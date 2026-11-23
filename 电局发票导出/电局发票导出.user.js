@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         陕电局·发票查询导出
 // @namespace    local.sn.tax.invoice
-// @version      3.5.1
+// @version      3.5.2
 // @description  多税号批量：切户→主页搜索全量发票查询→查询→导出全部，双层控制面板，无权限识别，失败自动重跑，日志按轮次分工作表写 xlsx，另出纯文本运行日志
 // @match        https://etax.shaanxi.chinatax.gov.cn/*
 // @match        https://tpass.shaanxi.chinatax.gov.cn:8443/*
@@ -112,6 +112,7 @@
   const RUNLOG_MAX = 4000;
   const KEY_LAST_DL = 'sn_inv_lastdl';   // 上次日志下载指纹，用于跨页面去重
   const DL_DEDUP_MS = 20000;             // 同一份日志 20 秒内只下载一次
+  const DL_CONFIRM_MS = 10000;           // 点「导出全部」后等下载信号的时长，超时才允许补点
   let rlCache = null;
   let rlDirty = 0;
 
@@ -288,11 +289,16 @@
       el.dispatchEvent(new MouseEvent('mousedown', opts));
       el.dispatchEvent(new PointerEvent('pointerup', opts));
       el.dispatchEvent(new MouseEvent('mouseup', opts));
-      el.dispatchEvent(new MouseEvent('click', opts));
     } catch (e) {
       console.warn('[hardClick] 事件派发失败', e);
     }
-    try { el.click(); } catch (e) {}
+    // 注意：click 只能发一次。以前这里同时 dispatchEvent(click) 和 el.click()，
+    // 会让「导出全部」这类会触发下载的按钮被点两次，从而每次多下一个一模一样的文件。
+    try {
+      el.click();
+    } catch (e) {
+      try { el.dispatchEvent(new MouseEvent('click', opts)); } catch (e2) {}
+    }
     return true;
   }
 
@@ -987,9 +993,40 @@
     }
 
     if (!(await isleep(300))) return { ok: false, killed: true };
-    hardClick(item);
-    rlog('导出', '已点击「导出全部」');
-    flushRunLog();
+
+    // 点击「导出全部」：最多点 2 次，且每次补点前必须先确认没有下载信号，
+    // 否则会把同一份导出触发两次、生成两个一模一样的文件。
+    const findItem = async (ms) => waitFor(() => {
+      const items = qsa(document, '.t-dropdown__item-text, .t-dropdown__item');
+      const hit = items.find((i) => textMatch(i, '导出全部') && visible(i));
+      return hit ? (hit.closest('.t-dropdown__item') || hit) : null;
+    }, ms);
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      hardClick(item);
+      rlog('导出', `已点击「导出全部」（第 ${attempt} 次）`);
+      flushRunLog();
+
+      const t0 = Date.now();
+      while (Date.now() - t0 < DL_CONFIRM_MS) {
+        if (dlFlag.hit > 0) return { ok: true };
+        if (!(await isleep(300))) return { ok: false, killed: true };
+      }
+      if (isKilled()) return { ok: false, killed: true };
+
+      if (attempt === 1) {
+        rlog('导出', `${Math.round(DL_CONFIRM_MS / 1000)} 秒内未检测到下载信号，准备补点一次`);
+        item = await findItem(3000);
+        if (!item) {
+          const arrow = btn.querySelector('svg.t-icon-chevron-down, .t-button__suffix, span[class*="chevron"]');
+          hardClick(arrow || btn);
+          if (!(await isleep(800))) return { ok: false, killed: true };
+          item = await findItem(8000);
+        }
+        if (!item) return { ok: false, step: 14, error: '补点时未找到“导出全部”下拉项' };
+        if (!(await isleep(200))) return { ok: false, killed: true };
+      }
+    }
     return { ok: true };
   }
 
