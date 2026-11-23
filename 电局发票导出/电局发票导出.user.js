@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         陕电局·发票查询导出
 // @namespace    local.sn.tax.invoice
-// @version      3.4.0
-// @description  多税号批量：切户→主页搜索全量发票查询→查询→导出全部，双层控制面板，无权限识别，失败自动重跑，日志按轮次分工作表写 xlsx
+// @version      3.5.0
+// @description  多税号批量：切户→主页搜索全量发票查询→查询→导出全部，双层控制面板，无权限识别，失败自动重跑，日志按轮次分工作表写 xlsx，另出纯文本运行日志
 // @match        https://etax.shaanxi.chinatax.gov.cn/*
 // @match        https://tpass.shaanxi.chinatax.gov.cn:8443/*
 // @match        https://dppt.shaanxi.chinatax.gov.cn:8443/*
@@ -105,6 +105,91 @@
     return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   };
 
+  /* ====================================================================
+   * 运行日志（纯文本，和 xlsx 日志同目录、同下载时机，便于排查问题）
+   * ================================================================== */
+  const KEY_RUNLOG = 'sn_inv_runlog';
+  const RUNLOG_MAX = 4000;
+  let rlCache = null;
+  let rlDirty = 0;
+
+  const tsFull = (d) => {
+    d = d || new Date();
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} `
+      + `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+  };
+
+  function loadRunLog() {
+    if (rlCache) return rlCache;
+    try { rlCache = GM_getValue(KEY_RUNLOG, []); } catch (e) { rlCache = []; }
+    if (!Array.isArray(rlCache)) rlCache = [];
+    return rlCache;
+  }
+
+  function flushRunLog() {
+    if (!rlCache || !rlDirty) return;
+    try { GM_setValue(KEY_RUNLOG, rlCache); rlDirty = 0; } catch (e) { /* ignore */ }
+  }
+
+  function rlog(tag, msg) {
+    try {
+      const arr = loadRunLog();
+      arr.push(`${tsFull()} [${tag}] ${msg}`);
+      if (arr.length > RUNLOG_MAX) arr.splice(0, arr.length - RUNLOG_MAX);
+      rlDirty++;
+      if (rlDirty >= 15) flushRunLog();
+    } catch (e) { /* ignore */ }
+  }
+
+  let lastTickSig = '';
+  function rlogOnce(sig, tag, msg) {
+    if (sig === lastTickSig) return;
+    lastTickSig = sig;
+    rlog(tag, msg);
+  }
+
+  function clearRunLog() {
+    rlCache = [];
+    rlDirty = 0;
+    try { GM_setValue(KEY_RUNLOG, []); } catch (e) { /* ignore */ }
+  }
+
+  function downloadRunLog(cfg, job) {
+    flushRunLog();
+    const j = job || getJob();
+    const lines = loadRunLog();
+    const fileName = j.runLogFileName || `脚本运行日志_${nowStamp()}.txt`;
+    try {
+      const head = [
+        '【电局发票导出 · 脚本运行日志】',
+        `导出时间：${tsFull()}`,
+        `日志文件：${j.logFileName || '—'}`,
+        `日期范围：${cfg.dateRange || '—'}　发票类型：${cfg.invType || '—'}`,
+        `税号数：${(j.list || []).length}　日志行数：${(j.rows || []).length}　轮次：${(Number(j.rerunRound) || 0) + 1}`,
+        '------------------------------------------------------------',
+      ].join('\r\n');
+      const text = `${head}\r\n${lines.join('\r\n')}\r\n`;
+      const blob = new Blob([`\ufeff${text}`], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const name = `${cleanDir(cfg.logDir)}/${fileName}`;
+
+      let fellBack = false;
+      const fallback = () => {
+        if (fellBack) return;
+        fellBack = true;
+        const a = document.createElement('a');
+        a.href = url; a.download = fileName;
+        document.body.appendChild(a); a.click(); a.remove();
+      };
+      try { GM_download({ url, name, saveAs: false, onerror: fallback }); } catch (e) { fallback(); }
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      return true;
+    } catch (e) {
+      console.error('[运行日志] 保存异常', e);
+      return false;
+    }
+  }
+
   function parseRange(text) {
     const s = String(text || '').trim().replace(/\s+/g, '');
     const m = s.match(/^(\d{4})[.\-/年](\d{1,2})[.\-/月](\d{1,2})日?\s*[-~—至到]\s*(\d{4})[.\-/年](\d{1,2})[.\-/月](\d{1,2})日?$/);
@@ -122,12 +207,35 @@
 
   function isValidRange(text) { return !!parseRange(text); }
 
+  /**
+   * 税号解析：
+   * - 支持中文逗号、英文逗号、分号、顿号、竖线、制表符、空格、换行等任意分隔
+   * - 支持直接从 Excel 整列复制（每行一个），也支持一行多个用逗号隔开
+   * - 去掉零宽字符/BOM、首尾引号与空白，统一大写
+   * - 只保留 15–20 位纯字母数字（统一社会信用代码/纳税人识别号），公司名等会被自动丢弃
+   */
+  const TAXID_RE = /^[0-9A-Z]{15,20}$/;
+
   function parseTaxIds(text) {
-    return Array.from(new Set(String(text || '')
-      .replace(/[，；;、\s]+/g, ',')
-      .split(',')
-      .map((s) => s.trim().toUpperCase())
-      .filter((s) => s.length >= 15)));
+    const out = [];
+    String(text || '')
+      .replace(/[\u200b-\u200f\u202a-\u202e\ufeff]/g, '')
+      .split(/[，,；;、|｜\t\r\n\s]+/)
+      .forEach((seg) => {
+        // 每段先剥掉引号、中文、冒号等非字母数字字符，只留可能的税号本体
+        const s = seg.replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+        if (!s) return;
+        if (s.length <= 20) {
+          if (TAXID_RE.test(s)) out.push(s);
+          return;
+        }
+        // 多个税号无分隔粘连时，按 18 位（统一社会信用代码）切块
+        for (let i = 0; i + 18 <= s.length; i += 18) {
+          const piece = s.slice(i, i + 18);
+          if (TAXID_RE.test(piece)) out.push(piece);
+        }
+      });
+    return Array.from(new Set(out));
   }
 
   function textMatch(el, kw) { return (el.textContent || '').replace(/\s+/g, '').includes(kw); }
@@ -282,6 +390,7 @@
     step: 0,
     runStartedAt: '',
     logFileName: '',
+    runLogFileName: '',
     failedAt: '',
     rows: [],
     total: 0,
@@ -393,6 +502,8 @@
   function downloadLog(cfg, job) {
     const j = job || getJob();
     const rows = Array.isArray(j.rows) ? j.rows : [];
+    rlog('日志', `开始保存日志（${rows.length} 行）→ ${cleanDir(cfg.logDir)}/${j.logFileName || '（临时名）'}`);
+    let ok = false;
     try {
       const blob = buildXlsxBlob(rows, j);
       const url = URL.createObjectURL(blob);
@@ -414,11 +525,16 @@
         fallback();
       }
       setTimeout(() => URL.revokeObjectURL(url), 60000);
-      return true;
+      ok = true;
     } catch (e) {
+      rlog('日志', `xlsx 保存异常：${(e && e.message) || e}`);
       console.error('[日志] 保存异常', e);
-      return false;
     }
+
+    // 同目录、同下载时机，额外导出一份纯文本运行日志，便于排查
+    try { downloadRunLog(cfg, j); } catch (e) { /* ignore */ }
+
+    return ok;
   }
 
   function closeThisTabOrGoHome() {
@@ -447,7 +563,7 @@
     dlFlag.armed = false;
     dlFlag.hit++;
     dlFlag.ts = Date.now();
-    try { console.log('[下载] 检测到下载触发：' + reason); } catch (e) {}
+    rlog('下载', `检测到下载触发：${reason}`);
   }
 
   (function installDownloadDetect() {
@@ -497,6 +613,7 @@
     if (!input) return { ok: false, step: 2, error: '未找到统一社会信用代码输入框' };
     setNativeValue(input, taxId);
     if (!(await isleep(400))) return { ok: false, killed: true };
+    rlog('切户', `已填入税号 ${taxId}`);
 
     const qBtn = await waitFor(() => qsa(document, 'button.el-button--primary').find((b) => textMatch(b, '查询')), 12000);
     if (isKilled()) return { ok: false, killed: true };
@@ -504,10 +621,12 @@
 
     const rowsBefore = qsa(document, '.el-table__row').length;
     clickEl(qBtn);
+    rlog('切户', `已点击查询（查询前表格 ${rowsBefore} 行）`);
 
     // 先给页面刷新时间，再清空输入框（清空不影响已渲染的查询结果表）
     if (!(await isleep(Math.max(800, Number(cfg.queryWaitMs) || 2000)))) return { ok: false, killed: true };
     try { setNativeValue(input, ''); } catch (e) { /* ignore */ }
+    rlog('切户', '已清空输入框，开始查找结果中的税号');
 
     // 清空后再确认页面上是否出现该税号：没有就判为「无权限」
     const row = await waitFor(() => {
@@ -523,10 +642,12 @@
         error: `点查询并清空输入框后，结果表中未出现税号 ${taxId}（查询前 ${rowsBefore} 行，当前 ${qsa(document, '.el-table__row').length} 行），判定为无权限`,
       };
     }
+    rlog('切户', `结果表中已出现税号（当前表格 ${qsa(document, '.el-table__row').length} 行）`);
 
     const enterBtn = qsa(row, 'button').find((b) => textMatch(b, '进入'));
     if (!enterBtn) return { ok: false, step: 4, error: '结果行中未找到“进入”按钮' };
     clickEl(enterBtn);
+    rlog('切户', '已点击「进入」');
 
     const dlgBtn = await waitFor(() => {
       const box = document.querySelector('.el-message-box__wrapper');
@@ -537,12 +658,14 @@
     if (!dlgBtn) return { ok: false, step: 5, error: '未出现身份切换确认弹窗或未找到“确定”' };
     if (!(await isleep(300))) return { ok: false, killed: true };
     clickEl(dlgBtn);
+    rlog('切户', '已点击身份切换确认「确定」');
 
     const j2 = getJob();
     j2.switchedTaxId = taxId;
     j2.step = 6;
     j2.switchReqTs = Date.now();
     setJob(j2);
+    flushRunLog();
 
     if (!(await isleep(4000))) return { ok: false, killed: true };
 
@@ -566,6 +689,8 @@
       error: r.error || '',
     });
     setJob(job);
+    rlog('无权限', `${taxId} 判定无权限，跳过（后续轮次不再尝试）`);
+    flushRunLog();
     renderBar();
     renderPanel();
 
@@ -617,6 +742,8 @@
     if (!item) return { ok: false, step: 8, error: '输入后未弹出“全量发票查询”搜索下拉' };
     if (!(await isleep(300))) return { ok: false, killed: true };
     clickEl(item);
+    rlog('主页', '已点击搜索结果「全量发票查询」，等待新页面加载');
+    flushRunLog();
     return { ok: true };
   }
 
@@ -632,6 +759,7 @@
     if (!title) {
       return { ok: false, step: 9, error: `未找到“全量发票查询”卡片（页面卡片数：${qsa(document, '.g-card-menu-item__title').length}）` };
     }
+    rlog('卡片页', `已找到「全量发票查询」卡片（页面共 ${qsa(document, '.g-card-menu-item__title').length} 张卡片）`);
 
     const targets = [
       title.closest('.g-card-menu-item__content'),
@@ -644,7 +772,11 @@
       hardClick(target);
       const ok = await waitFor(() => isQueryPage(), 10000);
       if (isKilled()) return { ok: false, killed: true };
-      if (ok) return { ok: true };
+      if (ok) {
+        rlog('卡片页', '已进入全量发票查询页');
+        flushRunLog();
+        return { ok: true };
+      }
       if (!(await isleep(500))) return { ok: false, killed: true };
     }
 
@@ -694,6 +826,7 @@
 
     const now = (item.querySelector('input.t-input__inner') || {}).value || '';
     if (now.trim() !== type) return { ok: false, step: 10, error: `查询类型未切换成功（当前为“${now}”）` };
+    rlog('查询页', `查询类型已设为「${type}」`);
     return { ok: true };
   }
 
@@ -749,6 +882,7 @@
         if (readVal().trim() === dateStr) {
           document.body.click();
           if (!(await isleep(300))) return { ok: false, killed: true };
+          rlog('查询页', `日期已写入：${placeholderKw}=${dateStr}`);
           return { ok: true };
         }
         if (!(await isleep(300))) return { ok: false, killed: true };
@@ -762,7 +896,7 @@
       if (!okType) return { ok: false, killed: true };
       try { document.body.click(); } catch (e) {}
       if (!(await isleep(400))) return { ok: false, killed: true };
-      if (readVal().trim() === dateStr) return { ok: true };
+      if (readVal().trim() === dateStr) { rlog('查询页', `日期已写入：${placeholderKw}=${dateStr}`); return { ok: true }; }
       clickEl(input.closest('.t-input') || input);
       if (!(await isleep(500))) return { ok: false, killed: true };
     }
@@ -783,7 +917,7 @@
       const btn = findQueryButton();
       if (!btn) return { ok: false, step: 11, error: '未找到“查询”按钮' };
       clickEl(btn);
-      try { console.log(`[查询] 第 ${i}/${QUERY_CLICK_COUNT} 次点击`); } catch (e) {}
+      rlog('查询页', `点击「查询」第 ${i}/${QUERY_CLICK_COUNT} 次`);
       if (i < QUERY_CLICK_COUNT) {
         if (!(await isleep(gap))) return { ok: false, killed: true };
       }
@@ -832,6 +966,8 @@
 
     if (!(await isleep(300))) return { ok: false, killed: true };
     hardClick(item);
+    rlog('导出', '已点击「导出全部」');
+    flushRunLog();
     return { ok: true };
   }
 
@@ -906,12 +1042,16 @@
     job.total = job.list.length;
     setJob(job);
 
+    rlog('轮次', `第 ${(Number(job.rerunRound) || 0) + 1} 轮结束：本批 ${job.list.length} 户，未完成 ${failedIds.length} 户${failedIds.length ? `（${failedIds.join('、')}）` : ''}`);
+
     if (!failedIds.length) {
       job.running = false;
       job.step = 15;
       job.failedQueue = [];
       job.rerunRound = 0;
       setJob(job);
+      rlog('轮次', '全部税号已处理完毕，任务结束');
+      flushRunLog();
       downloadLog(cfg, job);
       return { finished: true, failedIds: [] };
     }
@@ -920,6 +1060,8 @@
       job.running = false;
       job.step = 15;
       setJob(job);
+      rlog('轮次', `已达到最大重跑轮数 ${MAX_RERUN_ROUNDS}，停止重跑`);
+      flushRunLog();
       downloadLog(cfg, job);
       return { finished: true, failedIds };
     }
@@ -935,6 +1077,9 @@
     job.switchedTaxId = '';
     job.switchReqTs = 0;
     setJob(job);
+
+    rlog('轮次', `开始第 ${(Number(job.rerunRound) || 0) + 1} 轮重跑，待处理 ${failedIds.length} 户`);
+    flushRunLog();
 
     return { finished: false, failedIds };
   }
@@ -959,7 +1104,15 @@
 
     const taxId = job.list[job.index];
 
+    rlogOnce(
+      `${location.hostname}|${location.pathname}|${job.step}|${job.index}|${taxId}|${job.switchedTaxId}`,
+      '步骤',
+      `页面=${location.hostname}${location.pathname.slice(0, 40)}　步骤=${STEP_NAMES[job.step] || job.step}　税号=${taxId}　第${job.index + 1}/${job.list.length}户　轮次=${(Number(job.rerunRound) || 0) + 1}`,
+    );
+
     if (isTaxDone(job, taxId)) {
+      const doneRow = (job.rows || []).filter((x) => x.taxId === taxId).pop();
+      rlog('跳过', `${taxId} 已有结果（${doneRow ? doneRow.status : '—'}），跳至下一户`);
       job.index++;
       job.step = 0;
       job.curStartAt = '';
@@ -1089,11 +1242,14 @@
     const pageText = snapshotPageText();
 
     if (!stat) {
+      rlog('查询结果', `${taxId} 无票（统计区无“合计金额”字样）`);
       finishOne(cfg, job, taxId, '无票', { amount: '', taxAmount: '', pageText });
       clearFailSnapshotsOfTax(job, taxId);
       await gotoNextTax(cfg, job);
       return;
     }
+
+    rlog('查询结果', `${taxId} 有票：合计金额=${stat.amountText || '—'} 合计税额=${stat.taxText || '—'}`);
 
     job.step = 13; setJob(job);
     armDownloadDetect();
@@ -1120,6 +1276,7 @@
       taxAmount: stat.taxText,
       pageText,
     });
+    rlog('完成', `${taxId} 有票-已导出`);
 
     clearFailSnapshotsOfTax(job, taxId);
 
@@ -1147,6 +1304,10 @@
     setJob(job);
 
     const pageText = r.pageText || snapshotPageText();
+
+    rlog('失败', `${taxId} 失败于 ${job.failedAt}：${r.error || '（无错误信息）'}`);
+    rlog('失败', `页面=${location.href}`);
+    flushRunLog();
 
     if (cfg.stopOnError) {
       job.running = false;
@@ -1333,7 +1494,7 @@
       <div class="pane ${cfg.layer2Tab !== 'fmt' ? 'on' : ''}" data-pane="run">
         <div class="row"><label>日期范围</label><input type="text" id="snRange" placeholder="2026.01.01-2026.12.31"></div>
         <div class="row" style="align-items:flex-start"><label>税号列表</label>
-          <textarea id="snTax" placeholder="多个税号用中文逗号分隔，例如：92610125MA6W5CYA5B，92610125MA6W0CQH4N"></textarea>
+          <textarea id="snTax" placeholder="可从 Excel 整列直接粘贴（每行一个），也可用中文逗号分隔，例如：92610125MA6W5CYA5B，92610125MA6W0CQH4N"></textarea>
         </div>
         <div class="row"><label>发票类型</label>
           <label style="width:auto;text-align:left"><input type="radio" name="snType" value="开具发票" checked> 开具（销项）</label>
@@ -1352,7 +1513,7 @@
           <button class="act" data-act="log">保存日志</button>
         </div>
         <div class="prog" id="snProg"></div>
-        <div class="tip">查询按钮连点 3 次；有票判据为出现“查询结果：合计金额”；失败项会自动重跑直到成功；切户查询后结果里没有该税号，记为「无权限」并永久跳过。日志按轮次分成多个工作表。</div>
+        <div class="tip">查询按钮连点 3 次；有票判据为出现“查询结果：合计金额”；失败项会自动重跑直到成功；切户查询后结果里没有该税号，记为「无权限」并永久跳过。日志按轮次分成多个工作表，并同目录附一份 txt 运行日志便于排查。</div>
       </div>
 
       <div class="pane ${cfg.layer2Tab === 'fmt' ? 'on' : ''}" data-pane="fmt">
@@ -1459,8 +1620,9 @@
       if (act === 'log') {
         const j = getJob();
         const ok = downloadLog(getCfg(), j);
-        if (ok) alert(`日志已开始下载：${j.logFileName || '（临时名）'}\n共 ${j.rows.length} 行，按轮次分成多个工作表。`);
-        else alert('日志生成失败，请按 F12 查看控制台');
+        if (ok) {
+          alert(`日志已开始下载（同目录两份）：\n${j.logFileName || '（临时名）'}\n${j.runLogFileName || '（临时名）'}\n\nxlsx 共 ${j.rows.length} 行，按轮次分成多个工作表。`);
+        } else alert('日志生成失败，请按 F12 查看控制台');
         return;
       }
       if (act === 'resetPos') {
@@ -1505,6 +1667,7 @@
       job.rows = []; job.index = 0; job.stopped = false; job.failedAt = '';
       job.rerunRound = 0; job.failedQueue = []; job.noPermList = [];
       job.logFileName = '';
+      job.runLogFileName = '';
     }
     job.running = true;
     job.stopped = false;
@@ -1518,8 +1681,17 @@
     if (job.index >= job.list.length) job.index = 0;
     if (!job.runStartedAt) job.runStartedAt = new Date().toISOString();
     if (!job.logFileName) job.logFileName = `发票导出日志_${nowStamp()}.xlsx`;
+    const freshRunLog = !job.runLogFileName;
+    if (freshRunLog) {
+      job.runLogFileName = `脚本运行日志_${nowStamp()}.txt`;
+      clearRunLog();
+    }
     job.step = 0;
     setJob(job);
+    rlog('开始', `任务启动：日期=${collected.dateRange}　类型=${collected.invType}　税号=${job.list.length} 户　轮次=${(Number(job.rerunRound) || 0) + 1}`);
+    rlog('开始', `目录=${cleanDir(collected.logDir)}　xlsx=${job.logFileName}　txt=${job.runLogFileName}`);
+    rlog('开始', `参数：queryWaitMs=${collected.queryWaitMs}　closeWaitMs=${collected.closeWaitMs}　stopOnError=${collected.stopOnError}`);
+    flushRunLog();
     renderBar();
     renderPanel();
     location.href = SWITCH_URL;
@@ -1537,6 +1709,8 @@
     job.switchedTaxId = '';
     job.switchReqTs = 0;
     setJob(job);
+    rlog('停止', `手动急停：已完成 ${job.index}/${job.total}，日志行数 ${job.rows.length}`);
+    flushRunLog();
     renderBar();
     renderPanel();
     try { downloadLog(getCfg(), job); } catch (e) { /* ignore */ }
@@ -1550,6 +1724,7 @@
     job.list = parseTaxIds(getCfg().taxText);
     job.total = job.list.length;
     setJob(job);
+    clearRunLog();
     renderBar();
     renderPanel();
   }
@@ -1571,7 +1746,10 @@
       return null;
     }
     const ids = parseTaxIds(taxText);
-    if (!ids.length) { alert('请填写至少一个税号，多个税号用中文逗号分隔'); return null; }
+    if (!ids.length) {
+      alert('请填写至少一个税号：可从 Excel 整列直接粘贴（每行一个），也可用中文逗号分隔，税号为 15–20 位字母数字');
+      return null;
+    }
 
     const r = parseRange(range);
     if (r.start > r.end) { alert('起始日期不能晚于截止日期'); return null; }
@@ -1601,6 +1779,9 @@
       if (job0.stopped || !job0.running) { killFlag = true; return; }
       await tick();
     } catch (e) {
+      rlog('异常', `tick 抛出异常：${(e && e.message) || e}`);
+      rlog('异常', String((e && e.stack) || '').split('\n').slice(0, 4).join(' | '));
+      flushRunLog();
       console.error('[tick] 异常', e);
     } finally {
       busy = false;
@@ -1609,6 +1790,23 @@
 
   function boot() {
     if (!document.getElementById('snInvWrap')) buildPanel();
+
+    try {
+      const job = getJob();
+      if (job.running && !job.stopped) {
+        rlog('页面', `加载 ${location.href}`);
+        flushRunLog();
+      }
+    } catch (e) { /* ignore */ }
+
+    // 页面跳转/关闭前把内存里的运行日志刷到 GM 存储，保证跨页不丢
+    try {
+      window.addEventListener('pagehide', flushRunLog);
+      window.addEventListener('beforeunload', flushRunLog);
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') flushRunLog();
+      });
+    } catch (e) { /* ignore */ }
 
     safeTick();
 
