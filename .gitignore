@@ -1,0 +1,40 @@
+# 临时分析文件（不属于项目）
+s*.py
+s*.txt
+scan*.py
+scan*.txt
+probe*.py
+ad*.py
+cmp*.py
+shopctx.py
+analyze*.py
+extract.py
+chk2.py
+check.py
+split.py
+durcheck.py
+fixpp.py
+publish.py
+addguide.py
+bump*.py
+pkg*.py
+verify.py
+unz*.py
+ext.py
+session_*.jsonl
+session_users.txt
+*_ctx.txt
+
+# 页面快照与媒体文件
+*.html
+*.mp3
+*.png
+*.rar
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 编辑器
+.vscode/
+.idea/
