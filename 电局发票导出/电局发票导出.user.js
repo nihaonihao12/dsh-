@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         陕电局·发票查询导出
 // @namespace    local.sn.tax.invoice
-// @version      3.5.0
+// @version      3.5.1
 // @description  多税号批量：切户→主页搜索全量发票查询→查询→导出全部，双层控制面板，无权限识别，失败自动重跑，日志按轮次分工作表写 xlsx，另出纯文本运行日志
 // @match        https://etax.shaanxi.chinatax.gov.cn/*
 // @match        https://tpass.shaanxi.chinatax.gov.cn:8443/*
@@ -110,6 +110,8 @@
    * ================================================================== */
   const KEY_RUNLOG = 'sn_inv_runlog';
   const RUNLOG_MAX = 4000;
+  const KEY_LAST_DL = 'sn_inv_lastdl';   // 上次日志下载指纹，用于跨页面去重
+  const DL_DEDUP_MS = 20000;             // 同一份日志 20 秒内只下载一次
   let rlCache = null;
   let rlDirty = 0;
 
@@ -173,15 +175,21 @@
       const url = URL.createObjectURL(blob);
       const name = `${cleanDir(cfg.logDir)}/${fileName}`;
 
-      let fellBack = false;
+      let settled = false;
       const fallback = () => {
-        if (fellBack) return;
-        fellBack = true;
+        if (settled) return;
+        settled = true;
         const a = document.createElement('a');
         a.href = url; a.download = fileName;
         document.body.appendChild(a); a.click(); a.remove();
       };
-      try { GM_download({ url, name, saveAs: false, onerror: fallback }); } catch (e) { fallback(); }
+      try {
+        GM_download({
+          url, name, saveAs: false,
+          onload: () => { settled = true; },
+          onerror: () => { setTimeout(fallback, 1500); },
+        });
+      } catch (e) { fallback(); }
       setTimeout(() => URL.revokeObjectURL(url), 60000);
       return true;
     } catch (e) {
@@ -499,28 +507,42 @@
   /**
    * 下载日志（只在轮次结束 / 任务完成 / 停止 / 手动时才调用，避免同名文件生成大量 (N) 副本）
    */
-  function downloadLog(cfg, job) {
+  function downloadLog(cfg, job, force) {
     const j = job || getJob();
     const rows = Array.isArray(j.rows) ? j.rows : [];
-    rlog('日志', `开始保存日志（${rows.length} 行）→ ${cleanDir(cfg.logDir)}/${j.logFileName || '（临时名）'}`);
+    const dir = cleanDir(cfg.logDir);
+    const fileName = j.logFileName || `发票导出日志_${nowStamp()}.xlsx`;
+    // 跨页面去重：多标签页面板都可能触发保存，同一份日志短时间内只下载一次
+    const dlSig = `${dir}/${fileName}|${rows.length}|${(Number(j.rerunRound) || 0) + 1}`;
+    const lastDl = GM_getValue(KEY_LAST_DL, null);
+    if (!force && lastDl && lastDl.sig === dlSig && Date.now() - (Number(lastDl.ts) || 0) < DL_DEDUP_MS) {
+      rlog('日志', `跳过重复下载：${fileName} 刚在 ${Math.round((Date.now() - lastDl.ts) / 1000)} 秒内保存过`);
+      flushRunLog();
+      return false;
+    }
+    GM_setValue(KEY_LAST_DL, { sig: dlSig, ts: Date.now() });
+    rlog('日志', `开始保存日志（${rows.length} 行）→ ${dir}/${fileName}`);
     let ok = false;
     try {
       const blob = buildXlsxBlob(rows, j);
       const url = URL.createObjectURL(blob);
-      const fileName = j.logFileName || `发票导出日志_${nowStamp()}.xlsx`;
-      const name = `${cleanDir(cfg.logDir)}/${fileName}`;
+      const name = `${dir}/${fileName}`;
 
-      let fellBack = false;
+      let settled = false;
       const fallback = () => {
-        if (fellBack) return;
-        fellBack = true;
+        if (settled) return;
+        settled = true;
         const a = document.createElement('a');
         a.href = url; a.download = fileName;
         document.body.appendChild(a); a.click(); a.remove();
       };
 
       try {
-        GM_download({ url, name, saveAs: false, onerror: fallback });
+        GM_download({
+          url, name, saveAs: false,
+          onload: () => { settled = true; },
+          onerror: () => { setTimeout(fallback, 1500); },
+        });
       } catch (e) {
         fallback();
       }
@@ -1619,7 +1641,7 @@
       if (act === 'clear') { doClear(); return; }
       if (act === 'log') {
         const j = getJob();
-        const ok = downloadLog(getCfg(), j);
+        const ok = downloadLog(getCfg(), j, true);
         if (ok) {
           alert(`日志已开始下载（同目录两份）：\n${j.logFileName || '（临时名）'}\n${j.runLogFileName || '（临时名）'}\n\nxlsx 共 ${j.rows.length} 行，按轮次分成多个工作表。`);
         } else alert('日志生成失败，请按 F12 查看控制台');
@@ -1698,6 +1720,13 @@
   }
 
   function doStop() {
+    const cur = getJob();
+    // 防重入：多个页面的面板、或手抖连点，都会触发急停，这里只认第一次
+    if (cur.stopped && Date.now() - (Number(cur.stopTs) || 0) < 30000) {
+      rlog('停止', '忽略重复的急停请求（30 秒内已执行过）');
+      flushRunLog();
+      return;
+    }
     killFlag = true;
     busy = false;
     const job = getJob();
