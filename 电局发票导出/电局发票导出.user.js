@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         陕电局·发票查询导出
 // @namespace    local.sn.tax.invoice
-// @version      3.3.0
-// @description  多税号批量：切户→主页搜索全量发票查询→查询→导出全部，双层控制面板，失败自动重跑，日志写 xlsx
+// @version      3.4.0
+// @description  多税号批量：切户→主页搜索全量发票查询→查询→导出全部，双层控制面板，无权限识别，失败自动重跑，日志按轮次分工作表写 xlsx
 // @match        https://etax.shaanxi.chinatax.gov.cn/*
 // @match        https://tpass.shaanxi.chinatax.gov.cn:8443/*
 // @match        https://dppt.shaanxi.chinatax.gov.cn:8443/*
@@ -30,6 +30,13 @@
   const NO_INVOICE_WAIT_MS = 20000;
   const PRE_CHECK_DELAY_MS = 700;
   const MAX_RERUN_ROUNDS = 20;
+  // 无权限判定：点查询后等页面刷新，再清空输入框，短时内仍无该税号即判为无权限
+  const NO_PERM_WAIT_MS = 9000;
+  // 会计专用格式（Excel 内置「会计专用/两位小数」）
+  const ACCT_FMT = '_ * #,##0.00_ ;_ * -#,##0.00_ ;_ * "-"??_ ;_ @_ ';
+  // 用户要求的「14.4 磅」列宽：走 SheetJS 的 wch 换算（Excel 显示 ≈ wch + 0.83），故填 13.57
+  const WCH_14_4 = 13.57;
+  const WCH_SPACER = 3;
   const STEP_NAMES = [
     '0-未开始',
     '1-打开切户页',
@@ -226,6 +233,30 @@
     return { found: true, amountText: nums[0] || '', taxText: nums[1] || '', hasInvoice: true };
   }
 
+  /**
+   * 从「页面文字快照」里提取「合计金额：176,640.40元　合计税额：2,659.60元」
+   * 返回 { amount, tax }，未提取到的为 null
+   */
+  const AMT_RE = /合计金额[：:]\s*([0-9][0-9,]*(?:\.[0-9]+)?)/;
+  const TAX_RE = /合计税额[：:]\s*([0-9][0-9,]*(?:\.[0-9]+)?)/;
+
+  function toNum(v) {
+    if (v == null || v === '') return null;
+    const n = Number(String(v).replace(/,/g, '').replace(/[^\d.\-]/g, ''));
+    return isFinite(n) ? n : null;
+  }
+
+  function extractAmounts(text, fallbackAmount, fallbackTax) {
+    const t = String(text || '').replace(/\u00a0/g, ' ').replace(/\u3000/g, ' ');
+    const ma = t.match(AMT_RE);
+    const mt = t.match(TAX_RE);
+    let amount = ma ? toNum(ma[1]) : null;
+    let tax = mt ? toNum(mt[1]) : null;
+    if (amount == null) amount = toNum(fallbackAmount);
+    if (tax == null) tax = toNum(fallbackTax);
+    return { amount, tax };
+  }
+
   /* ====================================================================
    * 配置 / 任务状态
    * ================================================================== */
@@ -261,6 +292,7 @@
     switchReqTs: 0,
     rerunRound: 0,
     failedQueue: [],
+    noPermList: [],
   });
 
   const getCfg = () => Object.assign(defaultCfg(), GM_getValue(KEY_CFG, {}) || {});
@@ -271,23 +303,82 @@
   /* ====================================================================
    * 日志 xlsx（新增“失败快照”列）
    * ================================================================== */
-  function buildXlsxBlob(rows, job) {
-    const header = ['序号', '总户数', '税号', '发票类型', '状态', '情况记录', '合计金额', '合计税额',
-      '开始时间', '完成时间', '耗时(秒)', '失败步骤', '失败URL', '错误摘要', '失败时页面快照', '页面文字快照'];
-    const aoa = [header];
-    rows.forEach((r) => aoa.push([
+  const LOG_HEADERS = ['序号', '总户数', '税号', '发票类型', '状态', '情况记录', '合计金额', '合计税额',
+    '开始时间', '完成时间', '耗时(秒)', '失败步骤', '失败URL', '错误摘要', '失败时页面快照', '页面文字快照'];
+  // 列宽（字符）：失败URL/错误摘要/失败时页面快照/页面文字快照 四列按要求统一 14.4 磅
+  const LOG_WIDTHS = [6, 8, 24, 12, 16, 26, 16, 14, 20, 20, 10, 18, WCH_14_4, WCH_14_4, WCH_14_4, WCH_14_4];
+  const CN_NUM = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
+    '十一', '十二', '十三', '十四', '十五', '十六', '十七', '十八', '十九', '二十'];
+  const cnRound = (n) => CN_NUM[n] || String(n);
+
+  function rowToLine(r, job) {
+    const num = (v) => ((v === '' || v == null || !isFinite(Number(v))) ? '' : Number(v));
+    return [
       r.no, job.total || '', r.taxId, r.type, r.status, r.history || '',
-      r.amount || '', r.taxAmount || '',
+      num(r.amount), num(r.taxAmount),
       r.startAt, r.endAt, r.cost,
       r.failStep || '', r.failUrl || '', (r.error || '').slice(0, 500),
       r.failSnapshot || '', r.pageText || '',
-    ]));
-    const wb = XLSX.utils.book_new();
+    ];
+  }
+
+  function makeLogSheet(rows, job) {
+    // 表头 + 每列之后插入一列空格列（16 列 → 32 列），空格列宽度窄，用于截断长文本不溢出
+    const head = [];
+    LOG_HEADERS.forEach((h) => { head.push(h); head.push(' '); });
+    const aoa = [head];
+    rows.forEach((r) => {
+      const padded = [];
+      rowToLine(r, job).forEach((v) => { padded.push(v); padded.push(' '); });
+      aoa.push(padded);
+    });
+
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws['!cols'] = [{ wch: 6 }, { wch: 8 }, { wch: 24 }, { wch: 12 }, { wch: 16 }, { wch: 26 },
-      { wch: 16 }, { wch: 14 }, { wch: 20 }, { wch: 20 }, { wch: 10 },
-      { wch: 18 }, { wch: 40 }, { wch: 60 }, { wch: 100 }, { wch: 100 }];
-    XLSX.utils.book_append_sheet(wb, ws, '导出日志');
+
+    const cols = [];
+    LOG_WIDTHS.forEach((w) => { cols.push({ wch: w }); cols.push({ wch: WCH_SPACER }); });
+    ws['!cols'] = cols;
+
+    // 合计金额 / 合计税额（原列序 6、7 → 插空后列序 12、14）写会计专用格式
+    const colAmt = XLSX.utils.encode_col(12);
+    const colTax = XLSX.utils.encode_col(14);
+    rows.forEach((r, i) => {
+      const rowNo = i + 2;
+      [colAmt, colTax].forEach((col) => {
+        const cell = ws[col + rowNo];
+        if (cell && typeof cell.v === 'number') cell.z = ACCT_FMT;
+      });
+    });
+
+    return ws;
+  }
+
+  function groupRowsByRound(rows) {
+    const map = new Map();
+    rows.forEach((r) => {
+      const k = Number(r.round) || 1;
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(r);
+    });
+    return Array.from(map.keys()).sort((a, b) => a - b).map((k) => ({ round: k, rows: map.get(k) }));
+  }
+
+  function buildXlsxBlob(rows, job) {
+    const wb = XLSX.utils.book_new();
+    const groups = groupRowsByRound(rows);
+    const multi = groups.length > 1;
+
+    groups.forEach((g) => {
+      const name = multi ? `第${cnRound(g.round)}轮` : '导出日志';
+      XLSX.utils.book_append_sheet(wb, makeLogSheet(g.rows, job), name);
+    });
+    if (!groups.length) {
+      XLSX.utils.book_append_sheet(wb, makeLogSheet([], job), '导出日志');
+    }
+    if (multi) {
+      XLSX.utils.book_append_sheet(wb, makeLogSheet(rows, job), '汇总');
+    }
+
     const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   }
@@ -296,27 +387,37 @@
     return String(dir || LOG_SUBDIR_DEFAULT).replace(/^\/+|\/+$/g, '').replace(/\\/g, '/') || LOG_SUBDIR_DEFAULT;
   }
 
-  let lastSaveAt = 0;
-  function saveLog(cfg, job) {
-    if (!job.logFileName) return;
-    const now = Date.now();
-    if (now - lastSaveAt < 5000) return;
-    lastSaveAt = now;
+  /**
+   * 下载日志（只在轮次结束 / 任务完成 / 停止 / 手动时才调用，避免同名文件生成大量 (N) 副本）
+   */
+  function downloadLog(cfg, job) {
+    const j = job || getJob();
+    const rows = Array.isArray(j.rows) ? j.rows : [];
     try {
-      const blob = buildXlsxBlob(job.rows, job);
+      const blob = buildXlsxBlob(rows, j);
       const url = URL.createObjectURL(blob);
-      const name = `${cleanDir(cfg.logDir)}/${job.logFileName}`;
-      GM_download({
-        url, name, saveAs: false, conflictAction: 'overwrite',
-        onerror: () => {
-          const a = document.createElement('a');
-          a.href = url; a.download = job.logFileName;
-          document.body.appendChild(a); a.click(); a.remove();
-        },
-      });
+      const fileName = j.logFileName || `发票导出日志_${nowStamp()}.xlsx`;
+      const name = `${cleanDir(cfg.logDir)}/${fileName}`;
+
+      let fellBack = false;
+      const fallback = () => {
+        if (fellBack) return;
+        fellBack = true;
+        const a = document.createElement('a');
+        a.href = url; a.download = fileName;
+        document.body.appendChild(a); a.click(); a.remove();
+      };
+
+      try {
+        GM_download({ url, name, saveAs: false, onerror: fallback });
+      } catch (e) {
+        fallback();
+      }
       setTimeout(() => URL.revokeObjectURL(url), 60000);
+      return true;
     } catch (e) {
       console.error('[日志] 保存异常', e);
+      return false;
     }
   }
 
@@ -400,14 +501,28 @@
     const qBtn = await waitFor(() => qsa(document, 'button.el-button--primary').find((b) => textMatch(b, '查询')), 12000);
     if (isKilled()) return { ok: false, killed: true };
     if (!qBtn) return { ok: false, step: 3, error: '未找到查询按钮' };
+
+    const rowsBefore = qsa(document, '.el-table__row').length;
     clickEl(qBtn);
 
+    // 先给页面刷新时间，再清空输入框（清空不影响已渲染的查询结果表）
+    if (!(await isleep(Math.max(800, Number(cfg.queryWaitMs) || 2000)))) return { ok: false, killed: true };
+    try { setNativeValue(input, ''); } catch (e) { /* ignore */ }
+
+    // 清空后再确认页面上是否出现该税号：没有就判为「无权限」
     const row = await waitFor(() => {
       const rows = qsa(document, '.el-table__row');
       return rows.find((tr) => (tr.textContent || '').toUpperCase().includes(taxId.toUpperCase()));
-    }, 25000);
+    }, NO_PERM_WAIT_MS);
     if (isKilled()) return { ok: false, killed: true };
-    if (!row) return { ok: false, step: 4, error: `查询结果中未找到税号 ${taxId}（共 ${qsa(document, '.el-table__row').length} 行）` };
+    if (!row) {
+      return {
+        ok: false,
+        noPermission: true,
+        step: 4,
+        error: `点查询并清空输入框后，结果表中未出现税号 ${taxId}（查询前 ${rowsBefore} 行，当前 ${qsa(document, '.el-table__row').length} 行），判定为无权限`,
+      };
+    }
 
     const enterBtn = qsa(row, 'button').find((b) => textMatch(b, '进入'));
     if (!enterBtn) return { ok: false, step: 4, error: '结果行中未找到“进入”按钮' };
@@ -435,6 +550,26 @@
       location.href = HOME_URL;
     }
     return { ok: true };
+  }
+
+  /**
+   * 无权限：记一行「无权限」到日志，加入 noPermList，然后直接处理下一个税号。
+   * isTaxDone() 已把「无权限」视为已处理，因此后续轮次不会再次尝试。
+   */
+  async function markNoPermission(cfg, job, taxId, r) {
+    if (!Array.isArray(job.noPermList)) job.noPermList = [];
+    if (!job.noPermList.includes(taxId)) job.noPermList.push(taxId);
+
+    finishOne(cfg, job, taxId, '无权限', {
+      failStep: STEP_NAMES[r.step] || '4-切户进入',
+      failUrl: location.href,
+      error: r.error || '',
+    });
+    setJob(job);
+    renderBar();
+    renderPanel();
+
+    await gotoNextTax(cfg, job);
   }
 
   /* ====================================================================
@@ -709,9 +844,12 @@
     const endAt = new Date();
     const cost = startAt ? Math.round((endAt - new Date(startAt)) / 1000) : '';
     const isFail = (status || '').indexOf('失败') === 0;
+    const isNoPerm = status === '无权限';
+    const isOk = (status === '有票-已导出' || status === '无票');
 
     const row = Object.assign({
       no: job.rows.length + 1,
+      round: (Number(job.rerunRound) || 0) + 1,
       taxId,
       type: cfg.invType,
       status,
@@ -728,7 +866,13 @@
       history: '',
     }, extra || {});
 
-    row.history = `${isFail ? '失败' : '成功'} ${hm(endAt)}`;
+    // 金额/税额：优先从「页面文字快照」提取；成功类结果若提取不到则记 0
+    const amts = extractAmounts(row.pageText, extra && extra.amount, extra && extra.taxAmount);
+    row.amount = amts.amount == null ? (isOk ? 0 : '') : amts.amount;
+    row.taxAmount = amts.tax == null ? (isOk ? 0 : '') : amts.tax;
+
+    if (isNoPerm) row.history = `无权限 ${hm(endAt)}`;
+    else row.history = `${isFail ? '失败' : '成功'} ${hm(endAt)}`;
 
     job.rows.push(row);
     job.total = job.list.length;
@@ -739,7 +883,8 @@
   }
 
   function isTaxDone(job, taxId) {
-    return job.rows.some((r) => r.taxId === taxId && (r.status === '有票-已导出' || r.status === '无票'));
+    return job.rows.some((r) => r.taxId === taxId
+      && (r.status === '有票-已导出' || r.status === '无票' || r.status === '无权限'));
   }
 
   function clearFailSnapshotsOfTax(job, taxId) {
@@ -760,7 +905,6 @@
 
     job.total = job.list.length;
     setJob(job);
-    saveLog(cfg, job);
 
     if (!failedIds.length) {
       job.running = false;
@@ -768,7 +912,7 @@
       job.failedQueue = [];
       job.rerunRound = 0;
       setJob(job);
-      saveLog(cfg, job);
+      downloadLog(cfg, job);
       return { finished: true, failedIds: [] };
     }
 
@@ -776,7 +920,7 @@
       job.running = false;
       job.step = 15;
       setJob(job);
-      saveLog(cfg, job);
+      downloadLog(cfg, job);
       return { finished: true, failedIds };
     }
 
@@ -791,7 +935,6 @@
     job.switchedTaxId = '';
     job.switchReqTs = 0;
     setJob(job);
-    saveLog(cfg, job);
 
     return { finished: false, failedIds };
   }
@@ -835,6 +978,7 @@
       if (!job.curStartAt) { job.curStartAt = new Date().toISOString(); setJob(job); }
       const r = await doSwitchPage(cfg, job, taxId);
       if (r && r.killed) return;
+      if (r && r.noPermission) { await markNoPermission(cfg, job, taxId, r); return; }
       if (!r.ok) return onRoundFail(cfg, job, taxId, r);
       return;
     }
@@ -991,7 +1135,6 @@
     job.switchedTaxId = '';
     job.switchReqTs = 0;
     setJob(job);
-    saveLog(cfg, job);
     if (!(await isleep(1500))) return;
     closeThisTabOrGoHome();
   }
@@ -1018,7 +1161,7 @@
         pageText,
       });
       setJob(job);
-      saveLog(cfg, job);
+      downloadLog(cfg, job);
       return;
     }
 
@@ -1124,12 +1267,16 @@
     const stepName = STEP_NAMES[job.step] || '';
     const state = job.running ? '运行中' : (job.stopped ? '已停止' : (job.rows.length && job.index >= job.list.length ? '已完成' : '待开始'));
     const failCnt = job.rows.filter((r) => r.status === '失败').length;
+    const noPermCnt = job.rows.filter((r) => r.status === '无权限').length;
+    const roundNos = Array.from(new Set(job.rows.map((r) => Number(r.round) || 1))).sort((a, b) => a - b);
     if (progEl) {
       progEl.innerHTML = `
         <div>已完成：<b>${job.rows.length}</b> / ${total}</div>
         <div>当前税号：${cur || '—'}</div>
         <div>当前步骤：${stepName || '—'}</div>
         <div>状态：<b>${state}</b>${job.rerunRound ? ` ｜ 第 ${job.rerunRound + 1} 轮` : ''}</div>
+        ${roundNos.length > 1 ? `<div>日志工作表：${roundNos.map((n) => `第${cnRound(n)}轮`).join('、')} + 汇总</div>` : ''}
+        ${noPermCnt ? `<div style="color:#d46b08">无权限跳过：${noPermCnt} 户（后续轮次不再尝试）</div>` : ''}
         ${failCnt ? `<div style="color:#cf1322">本轮失败记录：${failCnt} 条（结束后自动重跑）</div>` : ''}
         ${job.failedAt ? `<div style="color:#cf1322">上次失败：${job.failedAt}</div>` : ''}
         <div style="color:#999;font-size:11px;margin-top:4px">页面：${location.hostname}</div>
@@ -1202,9 +1349,10 @@
           <button class="act primary" data-act="start">开始</button>
           <button class="act danger" data-act="stop">急停</button>
           <button class="act" data-act="clear">清空进度</button>
+          <button class="act" data-act="log">保存日志</button>
         </div>
         <div class="prog" id="snProg"></div>
-        <div class="tip">查询按钮连点 3 次；有票判据为出现“查询结果：合计金额”；失败项会自动重跑直到成功。</div>
+        <div class="tip">查询按钮连点 3 次；有票判据为出现“查询结果：合计金额”；失败项会自动重跑直到成功；切户查询后结果里没有该税号，记为「无权限」并永久跳过。日志按轮次分成多个工作表。</div>
       </div>
 
       <div class="pane ${cfg.layer2Tab === 'fmt' ? 'on' : ''}" data-pane="fmt">
@@ -1308,6 +1456,13 @@
       if (act === 'start') { doStart(); return; }
       if (act === 'stop') { doStop(); return; }
       if (act === 'clear') { doClear(); return; }
+      if (act === 'log') {
+        const j = getJob();
+        const ok = downloadLog(getCfg(), j);
+        if (ok) alert(`日志已开始下载：${j.logFileName || '（临时名）'}\n共 ${j.rows.length} 行，按轮次分成多个工作表。`);
+        else alert('日志生成失败，请按 F12 查看控制台');
+        return;
+      }
       if (act === 'resetPos') {
         const c = getCfg();
         c.panelPos = { left: 12, top: 12 };
@@ -1348,7 +1503,8 @@
     if (!job.running && job.rows.length && job.index >= job.list.length && job.list.length) {
       if (!confirm('上次已全部完成，是否重新开始？')) return;
       job.rows = []; job.index = 0; job.stopped = false; job.failedAt = '';
-      job.rerunRound = 0; job.failedQueue = [];
+      job.rerunRound = 0; job.failedQueue = []; job.noPermList = [];
+      job.logFileName = '';
     }
     job.running = true;
     job.stopped = false;
@@ -1383,6 +1539,7 @@
     setJob(job);
     renderBar();
     renderPanel();
+    try { downloadLog(getCfg(), job); } catch (e) { /* ignore */ }
   }
 
   function doClear() {
