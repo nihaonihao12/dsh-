@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         陕电局·发票查询导出
 // @namespace    local.sn.tax.invoice
-// @version      3.6.1
+// @version      3.6.2
 // @description  多税号批量：切户→主页搜索全量发票查询→查询→导出全部，双层控制面板，无权限识别，失败自动重跑，日志「汇总」排第一并按税号去重、表头带汇总报告，另出纯文本运行日志
 // @match        https://etax.shaanxi.chinatax.gov.cn/*
 // @match        https://tpass.shaanxi.chinatax.gov.cn:8443/*
@@ -1504,6 +1504,7 @@
   #snInvPanel button.act{padding:5px 12px;border:1px solid #ccd;border-radius:6px;background:#fff;cursor:pointer}
   #snInvPanel button.act.primary{background:#1677ff;color:#fff;border-color:#1677ff}
   #snInvPanel button.act.danger{background:#fff2f0;color:#cf1322;border-color:#ffa39e}
+  #snInvPanel button.act.mini{padding:4px 8px;font-size:12px;flex:none;white-space:nowrap;line-height:1.2}
   #snInvPanel .prog{margin-top:8px;padding:6px 8px;background:#f7f9fc;border-radius:6px;font-size:12px;color:#333;word-break:break-all}
   #snInvPanel .tip{font-size:12px;color:#888;margin-top:6px}
   #snInvPanel .opVal{width:44px;text-align:right;color:#666;font-size:12px;flex:none}
@@ -1645,7 +1646,7 @@
       </div>
 
       <div class="pane ${cfg.layer2Tab !== 'fmt' ? 'on' : ''}" data-pane="run">
-        <div class="row"><label>日期范围</label><input type="text" id="snRange" placeholder="2026.01.01-2026.12.31"></div>
+        <div class="row"><label>日期范围</label><input type="text" id="snRange" placeholder="2026.01.01-2026.12.31"><button class="act mini" data-act="thisYear" title="自动填入「今年 1 月 1 日 - 今天」">今年</button></div>
         <div class="row" style="align-items:flex-start"><label>税号列表</label>
           <textarea id="snTax" placeholder="可从 Excel 整列直接粘贴（每行一个），也可用中文逗号分隔，例如：92610125MA6W5CYA5B，92610125MA6W0CQH4N"></textarea>
         </div>
@@ -1768,6 +1769,20 @@
       if (act === 'start') { doStart(); return; }
       if (act === 'stop') { doStop(); return; }
       if (act === 'clear') { doClear(); return; }
+      if (act === 'thisYear') {
+        // 一键填入「今年 1 月 1 日 - 今天」
+        const d = new Date();
+        const y = d.getFullYear();
+        const val = `${y}.01.01-${y}.${pad2(d.getMonth() + 1)}.${pad2(d.getDate())}`;
+        const input = panel.querySelector('#snRange');
+        input.value = val;
+        const c = getCfg();
+        c.dateRange = val;
+        setCfg(c);
+        rlog('开始', `日期范围一键设为 ${val}`);
+        flushRunLog();
+        return;
+      }
       if (act === 'log') {
         const j = getJob();
         const ok = downloadLog(getCfg(), j, true);
