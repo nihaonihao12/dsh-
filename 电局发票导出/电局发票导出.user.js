@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         陕电局·发票查询导出
 // @namespace    local.sn.tax.invoice
-// @version      3.6.0
+// @version      3.6.1
 // @description  多税号批量：切户→主页搜索全量发票查询→查询→导出全部，双层控制面板，无权限识别，失败自动重跑，日志「汇总」排第一并按税号去重、表头带汇总报告，另出纯文本运行日志
 // @match        https://etax.shaanxi.chinatax.gov.cn/*
 // @match        https://tpass.shaanxi.chinatax.gov.cn:8443/*
@@ -24,7 +24,6 @@
    * ================================================================== */
   const HOME_URL = 'https://etax.shaanxi.chinatax.gov.cn/loginb/';
   const SWITCH_URL = 'https://tpass.shaanxi.chinatax.gov.cn:8443/#/identitySwitch/agent';
-  const LOG_SUBDIR_DEFAULT = '发票导出';
   const SWITCH_THROTTLE_MS = 15000;
   const QUERY_CLICK_COUNT = 3;
   const NO_INVOICE_WAIT_MS = 20000;
@@ -106,7 +105,7 @@
   };
 
   /* ====================================================================
-   * 运行日志（纯文本，和 xlsx 日志同目录、同下载时机，便于排查问题）
+   * 运行日志（纯文本，和 xlsx 日志同一次下载、同一目录，便于排查问题）
    * ================================================================== */
   const KEY_RUNLOG = 'sn_inv_runlog';
   const RUNLOG_MAX = 4000;
@@ -174,7 +173,7 @@
       const text = `${head}\r\n${lines.join('\r\n')}\r\n`;
       const blob = new Blob([`\ufeff${text}`], { type: 'text/plain;charset=utf-8' });
       const url = URL.createObjectURL(blob);
-      const name = `${cleanDir(cfg.logDir)}/${fileName}`;
+      const name = fileName;
 
       let settled = false;
       const fallback = () => {
@@ -386,7 +385,6 @@
     dateRange: '',
     taxText: '',
     invType: '开具发票',
-    logDir: LOG_SUBDIR_DEFAULT,
     stopOnError: false,
     closeWaitMs: 3000,
     queryWaitMs: 2000,
@@ -551,20 +549,16 @@
     return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   }
 
-  function cleanDir(dir) {
-    return String(dir || LOG_SUBDIR_DEFAULT).replace(/^\/+|\/+$/g, '').replace(/\\/g, '/') || LOG_SUBDIR_DEFAULT;
-  }
-
   /**
    * 下载日志（只在轮次结束 / 任务完成 / 停止 / 手动时才调用，避免同名文件生成大量 (N) 副本）
+   * 统一保存到浏览器默认下载目录（不分子目录）
    */
   function downloadLog(cfg, job, force) {
     const j = job || getJob();
     const rows = Array.isArray(j.rows) ? j.rows : [];
-    const dir = cleanDir(cfg.logDir);
     const fileName = j.logFileName || `发票导出日志_${nowStamp()}.xlsx`;
     // 跨页面去重：多标签页面板都可能触发保存，同一份日志短时间内只下载一次
-    const dlSig = `${dir}/${fileName}|${rows.length}|${(Number(j.rerunRound) || 0) + 1}`;
+    const dlSig = `${fileName}|${rows.length}|${(Number(j.rerunRound) || 0) + 1}`;
     const lastDl = GM_getValue(KEY_LAST_DL, null);
     if (!force && lastDl && lastDl.sig === dlSig && Date.now() - (Number(lastDl.ts) || 0) < DL_DEDUP_MS) {
       rlog('日志', `跳过重复下载：${fileName} 刚在 ${Math.round((Date.now() - lastDl.ts) / 1000)} 秒内保存过`);
@@ -572,12 +566,12 @@
       return false;
     }
     GM_setValue(KEY_LAST_DL, { sig: dlSig, ts: Date.now() });
-    rlog('日志', `开始保存日志（${rows.length} 行）→ ${dir}/${fileName}`);
+    rlog('日志', `开始保存日志（${rows.length} 行）→ ${fileName}`);
     let ok = false;
     try {
       const blob = buildXlsxBlob(rows, j);
       const url = URL.createObjectURL(blob);
-      const name = `${dir}/${fileName}`;
+      const name = fileName;
 
       let settled = false;
       const fallback = () => {
@@ -604,7 +598,7 @@
       console.error('[日志] 保存异常', e);
     }
 
-    // 同目录、同下载时机，额外导出一份纯文本运行日志，便于排查
+    // 同一次保存顺便带一份纯文本运行日志，便于排查
     try { downloadRunLog(cfg, j); } catch (e) { /* ignore */ }
 
     return ok;
@@ -1659,7 +1653,6 @@
           <label style="width:auto;text-align:left"><input type="radio" name="snType" value="开具发票" checked> 开具（销项）</label>
           <label style="width:auto;text-align:left"><input type="radio" name="snType" value="取得发票"> 取得（进项）</label>
         </div>
-        <div class="row"><label>日志子目录</label><input type="text" id="snDir" placeholder="发票导出"></div>
         <div class="row"><label>查询点击间隔(毫秒)</label><input type="number" id="snQueryWait" min="500" step="500" value="2000"></div>
         <div class="row"><label>关页前等待(毫秒)</label><input type="number" id="snWait" min="0" step="500" value="3000"></div>
         <div class="row"><label style="width:auto;text-align:left">
@@ -1672,7 +1665,7 @@
           <button class="act" data-act="log">保存日志</button>
         </div>
         <div class="prog" id="snProg"></div>
-        <div class="tip">查询按钮连点 3 次；有票判据为出现“查询结果：合计金额”；失败项会自动重跑直到成功；切户查询后结果里没有该税号，记为「无权限」并永久跳过。日志按轮次分成多个工作表，并同目录附一份 txt 运行日志便于排查。</div>
+        <div class="tip">查询按钮连点 3 次；有票判据为出现“查询结果：合计金额”；失败项会自动重跑直到成功；切户查询后结果里没有该税号，记为「无权限」并永久跳过。日志按轮次分成多个工作表，并同时附一份 txt 运行日志便于排查。两份文件都保存在浏览器默认下载目录。</div>
       </div>
 
       <div class="pane ${cfg.layer2Tab === 'fmt' ? 'on' : ''}" data-pane="fmt">
@@ -1701,7 +1694,6 @@
 
     panel.querySelector('#snRange').value = cfg.dateRange || '';
     panel.querySelector('#snTax').value = cfg.taxText || '';
-    panel.querySelector('#snDir').value = cfg.logDir || LOG_SUBDIR_DEFAULT;
     panel.querySelector('#snQueryWait').value = String(cfg.queryWaitMs != null ? cfg.queryWaitMs : 2000);
     panel.querySelector('#snWait').value = String(cfg.closeWaitMs != null ? cfg.closeWaitMs : 3000);
     panel.querySelector('#snStop').checked = !!cfg.stopOnError;
@@ -1780,7 +1772,7 @@
         const j = getJob();
         const ok = downloadLog(getCfg(), j, true);
         if (ok) {
-          alert(`日志已开始下载（同目录两份）：\n${j.logFileName || '（临时名）'}\n${j.runLogFileName || '（临时名）'}\n\nxlsx 共 ${j.rows.length} 行，按轮次分成多个工作表。`);
+          alert(`日志已开始下载（两份）：\n${j.logFileName || '（临时名）'}\n${j.runLogFileName || '（临时名）'}\n\nxlsx 共 ${j.rows.length} 行，按轮次分成多个工作表。`);
         } else alert('日志生成失败，请按 F12 查看控制台');
         return;
       }
@@ -1849,7 +1841,7 @@
     job.step = 0;
     setJob(job);
     rlog('开始', `任务启动：日期=${collected.dateRange}　类型=${collected.invType}　税号=${job.list.length} 户　轮次=${(Number(job.rerunRound) || 0) + 1}`);
-    rlog('开始', `目录=${cleanDir(collected.logDir)}　xlsx=${job.logFileName}　txt=${job.runLogFileName}`);
+    rlog('开始', `xlsx=${job.logFileName}　txt=${job.runLogFileName}（均保存到默认下载目录）`);
     rlog('开始', `参数：queryWaitMs=${collected.queryWaitMs}　closeWaitMs=${collected.closeWaitMs}　stopOnError=${collected.stopOnError}`);
     flushRunLog();
     renderBar();
@@ -1900,7 +1892,6 @@
   function collectConfig() {
     const range = (panel.querySelector('#snRange').value || '').trim();
     const taxText = (panel.querySelector('#snTax').value || '').trim();
-    const dir = (panel.querySelector('#snDir').value || '').trim() || LOG_SUBDIR_DEFAULT;
     const waitRaw = panel.querySelector('#snWait').value;
     const waitMs = Math.max(0, Number(waitRaw) || 3000);
     const queryWaitRaw = panel.querySelector('#snQueryWait').value;
@@ -1925,7 +1916,7 @@
     const old = getCfg();
     return {
       dateRange: range, taxText, invType: type,
-      logDir: dir, stopOnError: stop, closeWaitMs: waitMs, queryWaitMs,
+      stopOnError: stop, closeWaitMs: waitMs, queryWaitMs,
       panelPos: old.panelPos, opacity: old.opacity,
       layer2Open: old.layer2Open, layer2Tab: old.layer2Tab,
       minimized: old.minimized,
