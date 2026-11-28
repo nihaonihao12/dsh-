@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.9.1
+// @version      7.10.0
 // @description  识别广告角标/购物锚点/广告文字/自定义关键词，自动跳过广告视频；二级层为功能入口，内置判定逐项可开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.9.1 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.10.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -295,6 +295,7 @@
         whitelistEnabled: 'adskip.v2.whitelistEnabled',
         elementEnabled: 'adskip.v2.elementEnabled',
         adsEnabled: 'adskip.v2.adsEnabled',
+        blockLive: 'adskip.v2.blockLive',
         adBadgeEnabled: 'adskip.v2.adBadgeEnabled',
         shopAnchorEnabled: 'adskip.v2.shopAnchorEnabled',
         shopTextEnabled: 'adskip.v2.shopTextEnabled',
@@ -381,6 +382,8 @@
         whitelistEnabled: store.get(KEYS.whitelistEnabled, true),
         elementEnabled: store.get(KEYS.elementEnabled, true),
         adsEnabled: store.get(KEYS.adsEnabled, true),
+        // 屏蔽直播：见到直播间直接跳过，优先级同广告
+        blockLive: store.get(KEYS.blockLive, false),
         // 内置广告判定的逐项开关
         adBadgeEnabled: store.get(KEYS.adBadgeEnabled, true),
         shopAnchorEnabled: store.get(KEYS.shopAnchorEnabled, true),
@@ -1110,6 +1113,19 @@
         }
     }
 
+    // 当前卡片是不是直播间
+    function isLiveCard() {
+        try {
+            const card = getCurrentCard();
+            if (!card) return false;
+            if (card.getAttribute('data-e2e') === 'feed-live') return true;
+            if (card.querySelector && card.querySelector('[data-e2e="feed-live"]')) return true;
+            return false;
+        } catch (e) {
+            return false;
+        }
+    }
+
     // 代码内置的广告判定，每一项受独立开关控制
     // 注意：结构判定必须限定在当前卡片内。整页扫描时若用 document.body，
     // querySelector 会命中相邻预加载广告卡片的角标/商品按钮，造成误判。
@@ -1209,10 +1225,16 @@
             // 但命中 @ 博主词且开启「豁免博主广告」时例外：博主的广告也放行。
             const adOverride = state.exemptNotOverrideAds && !bloggerExempt;
 
-            if (adOverride && state.adsEnabled) {
-                const builtin = detectBuiltinAd(scope, text);
-                if (builtin) return { type: builtin.type, detail: builtin.detail + '（豁免不覆盖）' };
-                if (adTextHit) return { type: 'shop', detail: '广告文字：' + adTextHit + '（豁免不覆盖）' };
+            if (adOverride) {
+                // 屏蔽直播同属广告级优先级
+                if (state.blockLive && isLiveCard()) {
+                    return { type: 'live', detail: '直播（豁免不覆盖）' };
+                }
+                if (state.adsEnabled) {
+                    const builtin = detectBuiltinAd(scope, text);
+                    if (builtin) return { type: builtin.type, detail: builtin.detail + '（豁免不覆盖）' };
+                    if (adTextHit) return { type: 'shop', detail: '广告文字：' + adTextHit + '（豁免不覆盖）' };
+                }
             }
             return { type: 'exempt', detail: '豁免：' + exempt };
         }
@@ -1223,7 +1245,11 @@
             if (elemRule) return { type: 'element', detail: '元素：' + elemRule.label };
         }
 
-        // 2) 广告：内置判定（逐项受控）+ 广告文字（受「广告屏蔽」总开关控制）
+        // 2) 广告级判定：屏蔽直播 → 内置广告 → 广告文字
+        if (state.blockLive && isLiveCard()) {
+            return { type: 'live', detail: '直播' };
+        }
+
         if (state.adsEnabled) {
             const builtin = detectBuiltinAd(scope, text);
             if (builtin) return builtin;
@@ -1279,6 +1305,11 @@
         if (state.elementEnabled) {
             const r = detectElementRule(elScope);
             if (r) items.push('元素规则：' + r.label);
+        }
+
+        // 屏蔽直播（广告级优先级）
+        if (state.blockLive && isLiveCard()) {
+            items.push('直播');
         }
 
         // 广告（结构判定限定当前卡片）
@@ -3101,6 +3132,10 @@
                         <span class="ad-toggle-label">扫描全页面<span>整页扫描会算上相邻预加载卡片</span></span>
                         <button class="ad-mini-switch ad-scanfull" type="button" role="switch"><i></i></button>
                     </div>
+                    <div class="ad-toggle-row">
+                        <span class="ad-toggle-label">屏蔽直播<span>见到直播间直接跳过（优先级同广告）</span></span>
+                        <button class="ad-mini-switch ad-blocklive" type="button" role="switch"><i></i></button>
+                    </div>
                     <div class="ad-toggle-row" style="padding-left:12px">
                         <span class="ad-toggle-label">右侧互动栏豁免<span>全页扫描时跳过右侧按钮区</span></span>
                         <button class="ad-mini-switch ad-ignorebar" type="button" role="switch"><i></i></button>
@@ -3372,6 +3407,7 @@
             store.del(KEYS.whitelistEnabled);
             store.del(KEYS.elementEnabled);
             store.del(KEYS.adsEnabled);
+            store.del(KEYS.blockLive);
             store.del(KEYS.adBadgeEnabled);
             store.del(KEYS.shopAnchorEnabled);
             store.del(KEYS.shopTextEnabled);
@@ -3404,6 +3440,7 @@
             state.whitelistEnabled = true;
             state.elementEnabled = true;
             state.adsEnabled = true;
+            state.blockLive = false;
             state.adBadgeEnabled = true;
             state.shopAnchorEnabled = true;
             state.shopTextEnabled = true;
@@ -3746,6 +3783,18 @@
             });
         }
 
+        // 屏蔽直播
+        const blockLiveBtn = panelWrap.querySelector('.ad-blocklive');
+        if (blockLiveBtn) {
+            blockLiveBtn.addEventListener('click', () => {
+                state.blockLive = !state.blockLive;
+                store.set(KEYS.blockLive, state.blockLive);
+                syncToggleUI();
+                toast(state.blockLive ? '屏蔽直播已开启' : '屏蔽直播已关闭');
+                check();
+            });
+        }
+
         // 无操作自动隐藏
         const autoHideBtn = panelWrap.querySelector('.ad-autohide');
         if (autoHideBtn) {
@@ -3883,6 +3932,7 @@
         const exemptAds = panelWrap && panelWrap.querySelector('.ad-exemptads');
         const exemptBlog = panelWrap && panelWrap.querySelector('.ad-exemptblog');
         const autoHide = panelWrap && panelWrap.querySelector('.ad-autohide');
+        const blockLive = panelWrap && panelWrap.querySelector('.ad-blocklive');
         const kwOn = panelWrap && panelWrap.querySelector('.ad-kw-on');
         const wlOn = panelWrap && panelWrap.querySelector('.ad-wl-on');
         const elemOn = panelWrap && panelWrap.querySelector('.ad-elem-on');
@@ -3902,6 +3952,7 @@
         if (exemptAds) exemptAds.classList.toggle('on', !!state.exemptNotOverrideAds);
         if (exemptBlog) exemptBlog.classList.toggle('on', !!state.exemptBloggerAds);
         if (autoHide) autoHide.classList.toggle('on', !!state.autoHideEnabled);
+        if (blockLive) blockLive.classList.toggle('on', !!state.blockLive);
         if (kwOn) kwOn.classList.toggle('on', !!state.keywordEnabled);
         if (wlOn) wlOn.classList.toggle('on', !!state.whitelistEnabled);
         if (elemOn) elemOn.classList.toggle('on', !!state.elementEnabled);
@@ -4228,6 +4279,7 @@
                     whitelistEnabled: !!state.whitelistEnabled,
                     elementEnabled: !!state.elementEnabled,
                     adsEnabled: !!state.adsEnabled,
+                    blockLive: !!state.blockLive,
                     adBadgeEnabled: !!state.adBadgeEnabled,
                     shopAnchorEnabled: !!state.shopAnchorEnabled,
                     shopTextEnabled: !!state.shopTextEnabled,
@@ -4327,6 +4379,7 @@
         if (typeof o.whitelistEnabled === 'boolean') { state.whitelistEnabled = o.whitelistEnabled; store.set(KEYS.whitelistEnabled, state.whitelistEnabled); }
         if (typeof o.elementEnabled === 'boolean') { state.elementEnabled = o.elementEnabled; store.set(KEYS.elementEnabled, state.elementEnabled); }
         if (typeof o.adsEnabled === 'boolean') { state.adsEnabled = o.adsEnabled; store.set(KEYS.adsEnabled, state.adsEnabled); }
+        if (typeof o.blockLive === 'boolean') { state.blockLive = o.blockLive; store.set(KEYS.blockLive, state.blockLive); }
         if (typeof o.adBadgeEnabled === 'boolean') { state.adBadgeEnabled = o.adBadgeEnabled; store.set(KEYS.adBadgeEnabled, state.adBadgeEnabled); }
         if (typeof o.shopAnchorEnabled === 'boolean') { state.shopAnchorEnabled = o.shopAnchorEnabled; store.set(KEYS.shopAnchorEnabled, state.shopAnchorEnabled); }
         if (typeof o.shopTextEnabled === 'boolean') { state.shopTextEnabled = o.shopTextEnabled; store.set(KEYS.shopTextEnabled, state.shopTextEnabled); }
@@ -4929,6 +4982,7 @@
                 whitelistEnabled: !!state.whitelistEnabled,
                 elementEnabled: !!state.elementEnabled,
                 adsEnabled: !!state.adsEnabled,
+                blockLive: !!state.blockLive,
                 adBadgeEnabled: !!state.adBadgeEnabled,
                 shopAnchorEnabled: !!state.shopAnchorEnabled,
                 shopTextEnabled: !!state.shopTextEnabled,
