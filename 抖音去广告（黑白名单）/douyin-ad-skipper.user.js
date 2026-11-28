@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.11.0
+// @version      7.12.0
 // @description  识别广告角标/购物锚点/广告文字/自定义关键词，自动跳过广告视频；二级层为功能入口，内置判定逐项可开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.11.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.12.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -287,6 +287,7 @@
         whitelistLimit: 'adskip.v2.whitelistLimit',
         showSkipToast: 'adskip.v2.showSkipToast',
         muteOnSkip: 'adskip.v2.muteOnSkip',
+        muteDuration: 'adskip.v2.muteDuration',
         exemptNotOverrideAds: 'adskip.v2.exemptNotOverrideAds',
         exemptBloggerAds: 'adskip.v2.exemptBloggerAds',
         autoHideEnabled: 'adskip.v2.autoHideEnabled',
@@ -374,6 +375,8 @@
         showSkipToast: store.get(KEYS.showSkipToast, true),
         // 跳过时临时静音，避免广告声音漏出
         muteOnSkip: store.get(KEYS.muteOnSkip, true),
+        // 跳转后保持静音的时长（毫秒），用户可自行调大
+        muteDuration: clampNum(store.get(KEYS.muteDuration, 650), 0, 5000, 650),
         exemptNotOverrideAds: store.get(KEYS.exemptNotOverrideAds, false),
         // 博主豁免词（@ 开头）不覆盖广告：只放行普通视频，博主的带货广告仍然跳过
         exemptBloggerAds: store.get(KEYS.exemptBloggerAds, false),
@@ -1718,7 +1721,7 @@
             }
         } finally {
             skipping = false;
-            if (state.muteOnSkip) restoreVideoSound(650);
+            if (state.muteOnSkip) restoreVideoSound(state.muteDuration);
         }
 
         invalidateCardCache();
@@ -1819,6 +1822,9 @@
             runtime.lastResult = '触发限流，暂停中';
             return;
         }
+
+        // 确定要跳到这一步了：提前静音，缩短广告声音漏出的窗口
+        if (state.muteOnSkip) muteForSkip();
 
         clearTimeout(pendingTimer);
         pendingTimer = setTimeout(() => {
@@ -3190,6 +3196,13 @@
                         <span class="ad-toggle-label">跳过时静音<span>跳转瞬间临时静音，避免广告声音漏出</span></span>
                         <button class="ad-mini-switch ad-muteskip" type="button" role="switch"><i></i></button>
                     </div>
+                    <div class="ad-set-row">
+                        <span>静音时长</span>
+                        <input class="ad-num ad-mutedur-num" type="number"
+                               min="0" max="5000" step="100" value="${state.muteDuration}">
+                        <span>ms</span>
+                        <em class="ad-hint">建议 500–1500（0–5s）</em>
+                    </div>
                     <div class="ad-toggle-row">
                         <span class="ad-toggle-label">豁免不覆盖广告<span>命中豁免词时，明确广告仍然跳过</span></span>
                         <button class="ad-mini-switch ad-exemptads" type="button" role="switch"><i></i></button>
@@ -3455,6 +3468,7 @@
             store.del(KEYS.adsEnabled);
             store.del(KEYS.blockLive);
             store.del(KEYS.muteOnSkip);
+            store.del(KEYS.muteDuration);
             store.del(KEYS.adBadgeEnabled);
             store.del(KEYS.shopAnchorEnabled);
             store.del(KEYS.shopTextEnabled);
@@ -3489,6 +3503,7 @@
             state.adsEnabled = true;
             state.blockLive = false;
             state.muteOnSkip = true;
+            state.muteDuration = 650;
             state.adBadgeEnabled = true;
             state.shopAnchorEnabled = true;
             state.shopTextEnabled = true;
@@ -3813,6 +3828,17 @@
                 store.set(KEYS.muteOnSkip, state.muteOnSkip);
                 syncToggleUI();
                 toast(state.muteOnSkip ? '跳过时静音已开启' : '跳过时静音已关闭');
+            });
+        }
+
+        const muteDurNum = panelWrap.querySelector('.ad-mutedur-num');
+        if (muteDurNum) {
+            muteDurNum.addEventListener('change', () => {
+                const v = clampNum(muteDurNum.value, 0, 5000, state.muteDuration);
+                muteDurNum.value = v;
+                state.muteDuration = v;
+                store.set(KEYS.muteDuration, v);
+                toast('静音时长已设为 ' + v + 'ms');
             });
         }
 
@@ -4333,6 +4359,7 @@
                     nextArrowDir: state.nextArrowDir,
                     showSkipToast: !!state.showSkipToast,
                     muteOnSkip: !!state.muteOnSkip,
+                    muteDuration: state.muteDuration,
                     exemptNotOverrideAds: !!state.exemptNotOverrideAds,
                     exemptBloggerAds: !!state.exemptBloggerAds,
                     autoHideEnabled: !!state.autoHideEnabled,
@@ -4436,6 +4463,7 @@
         if (typeof o.ignoreRightBar === 'boolean') { state.ignoreRightBar = o.ignoreRightBar; store.set(KEYS.ignoreRightBar, state.ignoreRightBar); }
         if (typeof o.showSkipToast === 'boolean') { state.showSkipToast = o.showSkipToast; store.set(KEYS.showSkipToast, state.showSkipToast); }
         if (typeof o.muteOnSkip === 'boolean') { state.muteOnSkip = o.muteOnSkip; store.set(KEYS.muteOnSkip, state.muteOnSkip); }
+        if (typeof o.muteDuration === 'number') { state.muteDuration = clampNum(o.muteDuration, 0, 5000, state.muteDuration); store.set(KEYS.muteDuration, state.muteDuration); }
         if (typeof o.exemptNotOverrideAds === 'boolean') { state.exemptNotOverrideAds = o.exemptNotOverrideAds; store.set(KEYS.exemptNotOverrideAds, state.exemptNotOverrideAds); }
         if (typeof o.exemptBloggerAds === 'boolean') { state.exemptBloggerAds = o.exemptBloggerAds; store.set(KEYS.exemptBloggerAds, state.exemptBloggerAds); }
         if (typeof o.keywordEnabled === 'boolean') { state.keywordEnabled = o.keywordEnabled; store.set(KEYS.keywordEnabled, state.keywordEnabled); }
@@ -4483,6 +4511,7 @@
         set('.ad-wllimit-num', state.whitelistLimit);
         set('.ad-maxper-num', state.maxPerMinute);
         set('.ad-autohide-delay', state.autoHideDelay);
+        set('.ad-mutedur-num', state.muteDuration);
     }
 
     function closeImportDialog() {
@@ -5047,6 +5076,7 @@
                 adsEnabled: !!state.adsEnabled,
                 blockLive: !!state.blockLive,
                 muteOnSkip: !!state.muteOnSkip,
+                muteDuration: state.muteDuration,
                 adBadgeEnabled: !!state.adBadgeEnabled,
                 shopAnchorEnabled: !!state.shopAnchorEnabled,
                 shopTextEnabled: !!state.shopTextEnabled,
