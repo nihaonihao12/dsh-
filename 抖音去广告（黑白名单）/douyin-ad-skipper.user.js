@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.8.1
+// @version      7.9.0
 // @description  识别广告角标/购物锚点/广告文字/自定义关键词，自动跳过广告视频；二级层为功能入口，内置判定逐项可开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.8.1 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.9.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -1205,7 +1205,11 @@
         if (exempt) {
             const bloggerExempt = state.exemptBloggerAds && exempt.charAt(0) === '@';
 
-            if ((state.exemptNotOverrideAds || bloggerExempt) && state.adsEnabled) {
+            // 默认豁免优先（放行）。「豁免不覆盖广告」全局开启时广告优先，
+            // 但命中 @ 博主词且开启「豁免博主广告」时例外：博主的广告也放行。
+            const adOverride = state.exemptNotOverrideAds && !bloggerExempt;
+
+            if (adOverride && state.adsEnabled) {
                 const builtin = detectBuiltinAd(scope, text);
                 if (builtin) return { type: builtin.type, detail: builtin.detail + '（豁免不覆盖）' };
                 if (adTextHit) return { type: 'shop', detail: '广告文字：' + adTextHit + '（豁免不覆盖）' };
@@ -1265,7 +1269,7 @@
             const wl = matchWhitelist(text);
             if (wl) {
                 const note = (state.exemptBloggerAds && wl.charAt(0) === '@')
-                    ? '（博主豁免，不覆盖广告）'
+                    ? '（博主豁免：广告也放行）'
                     : '';
                 items.push('豁免标签：' + wl + note);
             }
@@ -2184,6 +2188,54 @@
         .ad-search::placeholder { color: #606069; }
         .ad-search:focus { border-color: rgba(96,165,250,.45); }
 
+        .ad-search-row { display: flex; align-items: center; gap: 6px; }
+        .ad-search-row .ad-search { flex: 1; width: auto; }
+        .ad-batch-btn {
+            flex: none;
+            padding: 5px 10px;
+            border-radius: 7px;
+            border: 1px solid rgba(255,255,255,.1);
+            background: rgba(255,255,255,.05);
+            color: #b9b9c2;
+            font: 11px system-ui, sans-serif;
+            cursor: pointer;
+        }
+        .ad-batch-btn:hover { background: rgba(255,255,255,.1); color: #fff; }
+        .ad-batch-btn.active {
+            border-color: rgba(248,113,113,.5);
+            background: rgba(239,68,68,.18);
+            color: #fca5a5;
+        }
+        .ad-batch-bar {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 10px;
+            color: #9a9aa4;
+        }
+        .ad-batch-bar .ad-batch-count { flex: 1; }
+        .ad-batch-bar button {
+            padding: 4px 9px;
+            border-radius: 6px;
+            border: 1px solid rgba(255,255,255,.1);
+            background: rgba(255,255,255,.05);
+            color: #c7c7cf;
+            font: 10px system-ui, sans-serif;
+            cursor: pointer;
+        }
+        .ad-batch-bar button:hover { background: rgba(255,255,255,.12); color: #fff; }
+        .ad-batch-bar .ad-batch-del {
+            border-color: rgba(248,113,113,.4);
+            background: rgba(239,68,68,.16);
+            color: #fca5a5;
+        }
+        .ad-tag.selected {
+            background: rgba(96,165,250,.3);
+            border-color: rgba(96,165,250,.65);
+            color: #fff;
+        }
+        .ad-tag.selected i { color: #fff; }
+
         .ad-tags {
             display: flex;
             flex-direction: column;
@@ -2914,7 +2966,15 @@
                         <input class="ad-input" type="text" maxlength="40" placeholder="输入关键词，回车添加">
                         <button class="ad-add" type="button">添加</button>
                     </div>
-                    <input class="ad-search ad-kw-search" type="text" placeholder="搜索已添加的屏蔽词…">
+                    <div class="ad-search-row">
+                        <input class="ad-search ad-kw-search" type="text" placeholder="搜索已添加的屏蔽词…">
+                        <button class="ad-batch-btn" type="button" data-list="tags">批量</button>
+                    </div>
+                    <div class="ad-batch-bar" data-list="tags" hidden>
+                        <span class="ad-batch-count">已选 0</span>
+                        <button class="ad-batch-all" type="button">全选</button>
+                        <button class="ad-batch-del" type="button">删除选中</button>
+                    </div>
                     <div class="ad-tags-head">已添加 <b class="ad-tag-count">0 / 60</b>（新词在最前）</div>
                     <div class="ad-tags"></div>
                     <div class="ad-tip">当前视频的标题、作者或画面文案中出现任一关键词时，自动跳过。</div>
@@ -2925,7 +2985,15 @@
                         <input class="ad-input ad-wl-input" type="text" maxlength="40" placeholder="豁免关键词，回车添加">
                         <button class="ad-add ad-wl-add" type="button">添加</button>
                     </div>
-                    <input class="ad-search ad-wl-search" type="text" placeholder="搜索已添加的豁免词…">
+                    <div class="ad-search-row">
+                        <input class="ad-search ad-wl-search" type="text" placeholder="搜索已添加的豁免词…">
+                        <button class="ad-batch-btn" type="button" data-list="whitelist">批量</button>
+                    </div>
+                    <div class="ad-batch-bar" data-list="whitelist" hidden>
+                        <span class="ad-batch-count">已选 0</span>
+                        <button class="ad-batch-all" type="button">全选</button>
+                        <button class="ad-batch-del" type="button">删除选中</button>
+                    </div>
                     <div class="ad-tags-head">已豁免 <b class="ad-wl-count">0 / 60</b></div>
                     <div class="ad-tags ad-wl-tags"></div>
                     <div class="ad-tip">命中任一豁免词时，这条视频不做任何跳过（优先级高于屏蔽词与元素规则）。</div>
@@ -2974,7 +3042,15 @@
                         <input class="ad-input ad-adtext-input" type="text" maxlength="40" placeholder="输入广告文字，回车添加">
                         <button class="ad-add ad-adtext-add" type="button">添加</button>
                     </div>
-                    <input class="ad-search ad-adtext-search" type="text" placeholder="搜索已添加的广告文字…">
+                    <div class="ad-search-row">
+                        <input class="ad-search ad-adtext-search" type="text" placeholder="搜索已添加的广告文字…">
+                        <button class="ad-batch-btn" type="button" data-list="adtext">批量</button>
+                    </div>
+                    <div class="ad-batch-bar" data-list="adtext" hidden>
+                        <span class="ad-batch-count">已选 0</span>
+                        <button class="ad-batch-all" type="button">全选</button>
+                        <button class="ad-batch-del" type="button">删除选中</button>
+                    </div>
                     <div class="ad-tags-head">已添加 <b class="ad-text-count">0 / 60</b>（新词在最前）</div>
                     <div class="ad-tags ad-adtext-tags"></div>
                     <div class="ad-tip">命中后按广告处理，优先级等同于内置判定：开启「豁免不覆盖广告」时，可以压过豁免词。</div>
@@ -3036,7 +3112,7 @@
                         <button class="ad-mini-switch ad-exemptads" type="button" role="switch"><i></i></button>
                     </div>
                     <div class="ad-toggle-row">
-                        <span class="ad-toggle-label">豁免博主广告<span>@ 开头的豁免词不覆盖广告，普通豁免词不受影响</span></span>
+                        <span class="ad-toggle-label">豁免博主广告<span>打开后 @ 开头的豁免词会豁免广告（允许看博主广告 / 避免误伤）</span></span>
                         <button class="ad-mini-switch ad-exemptblog" type="button" role="switch"><i></i></button>
                     </div>
                     <div class="ad-toggle-row">
@@ -3592,6 +3668,34 @@
             });
         }
 
+        // 批量删除
+        panelWrap.querySelectorAll('.ad-batch-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const key = btn.getAttribute('data-list');
+                const st = batchState[key];
+                st.active = !st.active;
+                if (!st.active) st.selected.clear();
+                syncBatchUI(key);
+                rerenderList(key);
+            });
+        });
+
+        panelWrap.querySelectorAll('.ad-batch-all').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const key = btn.parentElement.getAttribute('data-list');
+                getVisibleList(key).forEach(k => batchState[key].selected.add(k));
+                syncBatchUI(key);
+                rerenderList(key);
+            });
+        });
+
+        panelWrap.querySelectorAll('.ad-batch-del').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const key = btn.parentElement.getAttribute('data-list');
+                deleteSelected(key);
+            });
+        });
+
         // 跳过提示开关
         const skipToastBtn = panelWrap.querySelector('.ad-skiptoast');
         if (skipToastBtn) {
@@ -3616,7 +3720,7 @@
             });
         }
 
-        // 豁免博主广告：@ 开头的豁免词不覆盖广告
+        // 豁免博主广告：@ 开头的豁免词允许豁免广告
         const exemptBlogBtn = panelWrap.querySelector('.ad-exemptblog');
         if (exemptBlogBtn) {
             exemptBlogBtn.addEventListener('click', () => {
@@ -3624,8 +3728,8 @@
                 store.set(KEYS.exemptBloggerAds, state.exemptBloggerAds);
                 syncToggleUI();
                 toast(state.exemptBloggerAds
-                    ? '博主豁免不再放行广告（普通豁免词不受影响）'
-                    : '博主豁免恢复优先');
+                    ? '豁免博主广告'
+                    : '跳过博主广告（可能误伤）');
             });
         }
 
@@ -4358,6 +4462,7 @@
 
             tag.appendChild(label);
             tag.appendChild(del);
+            bindBatchTag(tag, kw, 'whitelist');
             return tag;
         }, '豁免词');
 
@@ -4462,11 +4567,127 @@
 
             tag.appendChild(label);
             tag.appendChild(del);
+            bindBatchTag(tag, kw, 'adtext');
             return tag;
         }, '广告文字');
 
         box.scrollTop = 0;
         updateEntryCounts();
+    }
+
+    /* ---------- 批量删除 ---------- */
+    const batchState = {
+        tags: { active: false, selected: new Set() },
+        whitelist: { active: false, selected: new Set() },
+        adtext: { active: false, selected: new Set() }
+    };
+
+    // 当前列表在搜索过滤后实际显示的内容
+    function getVisibleList(key) {
+        if (key === 'tags') {
+            const q = keywordFilter.trim().toLowerCase();
+            return q ? state.keywords.filter(k => k.toLowerCase().includes(q)) : state.keywords;
+        }
+        if (key === 'whitelist') {
+            const q = whitelistFilter.trim().toLowerCase();
+            return q ? state.whitelist.filter(k => k.toLowerCase().includes(q)) : state.whitelist;
+        }
+        const q = adTextFilter.trim().toLowerCase();
+        return q ? state.adTexts.filter(k => k.toLowerCase().includes(q)) : state.adTexts;
+    }
+
+    function rerenderList(key) {
+        if (key === 'tags') renderTags();
+        else if (key === 'whitelist') renderWhitelist();
+        else renderAdTexts();
+    }
+
+    function syncBatchUI(key) {
+        if (!panelWrap) return;
+        const btn = panelWrap.querySelector('.ad-batch-btn[data-list="' + key + '"]');
+        const bar = panelWrap.querySelector('.ad-batch-bar[data-list="' + key + '"]');
+        const st = batchState[key];
+
+        if (btn) {
+            btn.classList.toggle('active', st.active);
+            btn.textContent = st.active ? '退出' : '批量';
+        }
+        if (bar) {
+            bar.hidden = !st.active;
+            const count = bar.querySelector('.ad-batch-count');
+            if (count) count.textContent = '已选 ' + st.selected.size;
+        }
+    }
+
+    // 批量模式下的标签点击：切换选中
+    function bindBatchTag(tag, kw, key) {
+        if (!batchState[key].active) return;
+
+        const st = batchState[key];
+        if (st.selected.has(kw)) tag.classList.add('selected');
+
+        tag.addEventListener('click', (e) => {
+            if (e.target.tagName === 'I') return;   // 点删除按钮不切换选中
+            if (st.selected.has(kw)) st.selected.delete(kw);
+            else st.selected.add(kw);
+            syncBatchUI(key);
+            rerenderList(key);
+        });
+    }
+
+    // 通用确认弹窗
+    function confirmDialog(title, text, onOk) {
+        const mask = document.createElement('div');
+        mask.id = 'ad-import-mask';
+        mask.innerHTML = `
+            <div class="ad-import-box">
+                <div class="ad-import-head">${escapeHtml(title)}</div>
+                <div style="font-size:12px;color:#b9b9c2;line-height:1.6">${escapeHtml(text)}</div>
+                <div class="ad-import-actions">
+                    <button class="ad-import-cancel" type="button">取消</button>
+                    <button class="ad-import-ok" type="button">确认删除</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(mask);
+
+        const close = () => mask.remove();
+        mask.querySelector('.ad-import-cancel').addEventListener('click', close);
+        mask.querySelector('.ad-import-ok').addEventListener('click', () => {
+            close();
+            onOk();
+        });
+        mask.addEventListener('click', (e) => {
+            if (e.target === mask) close();
+        });
+    }
+
+    function deleteSelected(key) {
+        const st = batchState[key];
+        if (!st.selected.size) {
+            toast('还没有选中标签');
+            return;
+        }
+
+        const count = st.selected.size;
+        confirmDialog('批量删除', '确定删除选中的 ' + count + ' 个标签吗？此操作不可撤销。', () => {
+            if (key === 'tags') {
+                state.keywords = state.keywords.filter(k => !st.selected.has(k));
+                store.set(KEYS.keywords, state.keywords);
+            } else if (key === 'whitelist') {
+                state.whitelist = state.whitelist.filter(k => !st.selected.has(k));
+                store.set(KEYS.whitelist, state.whitelist);
+            } else {
+                state.adTexts = state.adTexts.filter(k => !st.selected.has(k));
+                store.set(KEYS.adTexts, state.adTexts);
+            }
+
+            st.selected.clear();
+            st.active = false;
+            syncBatchUI(key);
+            rerenderList(key);
+            toast('已删除 ' + count + ' 个标签');
+        });
     }
 
     // 按「@ 博主 / 普通」分组把标签渲染进容器
@@ -4556,6 +4777,7 @@
 
             tag.appendChild(label);
             tag.appendChild(del);
+            bindBatchTag(tag, kw, 'tags');
             return tag;
         }, '关键词');
 
