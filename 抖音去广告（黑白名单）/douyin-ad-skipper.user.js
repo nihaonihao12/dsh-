@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.0.0
+// @version      7.1.0
 // @description  识别广告角标/购物锚点/自定义关键词，自动跳过广告视频；二级层为功能入口，屏蔽标签、豁免标签、元素屏蔽、广告屏蔽可分别开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.0.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.1.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -1701,29 +1701,61 @@
         .ad-entry-desc { flex: 1; font-size: 10px; color: #6f6f78; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .ad-entry-arrow { flex: none; color: #6f6f78; font-size: 15px; line-height: 1; }
 
-        /* 三级层：子页返回头 */
+        /* 三级层：独立子窗口 */
+        #adskip-subwrap {
+            position: fixed;
+            z-index: 2147483647;
+            visibility: hidden;
+            pointer-events: none;
+            width: 340px;
+        }
+        #adskip-subwrap.open { visibility: visible; pointer-events: auto; }
+
+        #adskip-subpanel {
+            width: 100%;
+            max-height: 78vh;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            background: rgba(26,26,31,.98);
+            -webkit-backdrop-filter: blur(16px);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255,255,255,.1);
+            border-radius: 14px;
+            box-shadow: 0 18px 50px rgba(0,0,0,.65);
+            color: #e7e7ea;
+            font: 13px/1.5 system-ui, -apple-system, "Microsoft YaHei", sans-serif;
+            overflow: hidden;
+            opacity: 0;
+            transform: scale(.96) translateY(6px);
+            transition: opacity .16s ease, transform .16s ease;
+        }
+        #adskip-subwrap.open #adskip-subpanel { opacity: 1; transform: none; }
+
         .ad-sub-head {
             display: flex;
             align-items: center;
             gap: 6px;
-            padding-bottom: 7px;
-            border-bottom: 1px solid rgba(255,255,255,.06);
+            padding: 11px 13px;
+            border-bottom: 1px solid rgba(255,255,255,.07);
             flex: none;
         }
-        .ad-back {
+        .ad-sub-head b { flex: 1; font-size: 12px; color: #d8d8de; font-weight: 600; }
+        .ad-sub-close {
+            flex: none;
             background: none;
             border: 0;
-            color: #93c5fd;
-            font-size: 17px;
-            cursor: pointer;
-            padding: 0 5px;
+            color: #8a8a94;
+            font-size: 16px;
             line-height: 1;
-            border-radius: 5px;
+            cursor: pointer;
+            padding: 0 3px;
+            border-radius: 4px;
         }
-        .ad-back:hover { background: rgba(96,165,250,.16); }
-        .ad-sub-head b { font-size: 12px; color: #d8d8de; font-weight: 600; }
+        .ad-sub-close:hover { color: #fff; background: rgba(255,255,255,.08); }
 
         .ad-page { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 10px; flex: 1; overflow-y: auto; min-height: 0; }
+        .ad-page[hidden] { display: none !important; }
         .ad-page[data-page="tags"],
         .ad-page[data-page="whitelist"],
         .ad-page[data-page="elements"],
@@ -2216,6 +2248,7 @@
      * ============================================================ */
     let fab = null;
     let panelWrap = null;
+    let subWrap = null;
     let panelOpen = false;
     let statEl = null;
 
@@ -2381,6 +2414,7 @@
         window.addEventListener('resize', () => {
             clampFab();
             if (panelOpen) positionPanel();
+            if (subWrap && subWrap.classList.contains('open')) positionSub();
         });
     }
 
@@ -2447,11 +2481,17 @@
                     </div>
                 </div>
 
-                <div class="ad-page ad-sub" data-page="tags" hidden>
+                <div class="ad-resize-handle" title="拖动调整面板大小"></div>
+            </div>
+
+            <div id="adskip-subwrap">
+                <div id="adskip-subpanel">
                     <div class="ad-sub-head">
-                        <button class="ad-back" type="button" title="返回">‹</button>
-                        <b>屏蔽标签</b>
+                        <b class="ad-sub-title">功能</b>
+                        <button class="ad-sub-close" type="button" title="关闭">×</button>
                     </div>
+
+                <div class="ad-page ad-sub" data-page="tags" hidden>
                     <div class="ad-input-row">
                         <input class="ad-input" type="text" maxlength="40" placeholder="输入关键词，回车添加">
                         <button class="ad-add" type="button">添加</button>
@@ -2463,10 +2503,6 @@
                 </div>
 
                 <div class="ad-page ad-sub" data-page="whitelist" hidden>
-                    <div class="ad-sub-head">
-                        <button class="ad-back" type="button" title="返回">‹</button>
-                        <b>豁免标签</b>
-                    </div>
                     <div class="ad-input-row">
                         <input class="ad-input ad-wl-input" type="text" maxlength="40" placeholder="豁免关键词，回车添加">
                         <button class="ad-add ad-wl-add" type="button">添加</button>
@@ -2478,20 +2514,12 @@
                 </div>
 
                 <div class="ad-page ad-sub" data-page="elements" hidden>
-                    <div class="ad-sub-head">
-                        <button class="ad-back" type="button" title="返回">‹</button>
-                        <b>屏蔽元素</b>
-                    </div>
                     <div class="ad-tip">在页面上右键任意元素：选「屏蔽此标签文字」加入屏蔽标签，选「豁免此标签文字」加入豁免，选「屏蔽此元素」记成元素规则。</div>
                     <div class="ad-tags-head">已记录 <b class="ad-elem-count">0</b> 条规则（上限 100 万）</div>
                     <div class="ad-elements"></div>
                 </div>
 
                 <div class="ad-page ad-sub" data-page="logs" hidden>
-                    <div class="ad-sub-head">
-                        <button class="ad-back" type="button" title="返回">‹</button>
-                        <b>日志</b>
-                    </div>
                     <div class="ad-log-tabs">
                         <button class="ad-log-tab active" data-logview="diag" type="button">诊断日志</button>
                         <button class="ad-log-tab" data-logview="readable" type="button">可读日志</button>
@@ -2504,10 +2532,6 @@
                 </div>
 
                 <div class="ad-page ad-sub" data-page="settings" hidden>
-                    <div class="ad-sub-head">
-                        <button class="ad-back" type="button" title="返回">‹</button>
-                        <b>设置</b>
-                    </div>
                     <div class="ad-set-row">
                         <span>浮窗大小</span>
                         <input class="ad-num ad-size-num" type="number"
@@ -2611,28 +2635,29 @@
                         <button class="ad-import" type="button">导入配置</button>
                     </div>
                 </div>
+                </div>
+            </div>
 
-                <div class="ad-resize-handle" title="拖动调整面板大小"></div>
             </div>
         `;
         document.body.appendChild(panelWrap);
 
         statEl = panelWrap.querySelector('.ad-stat');
+        subWrap = panelWrap.querySelector('#adskip-subwrap');
 
         panelWrap.querySelector('.ad-close').addEventListener('click', closePanel);
 
-        // 二级层：功能入口 → 进入三级层
+        // 二级层：功能入口 → 打开独立的三级层窗口
         panelWrap.querySelectorAll('.ad-entry[data-target]').forEach(entry => {
             entry.addEventListener('click', (e) => {
-                if (e.target.closest('.ad-mini-switch')) return;   // 点开关不进入子页
-                switchTab(entry.getAttribute('data-target'));
+                if (e.target.closest('.ad-mini-switch')) return;   // 点开关不打开窗口
+                openSub(entry.getAttribute('data-target'));
             });
         });
 
-        // 三级层：返回二级层
-        panelWrap.querySelectorAll('.ad-back').forEach(btn => {
-            btn.addEventListener('click', () => switchTab('home'));
-        });
+        // 三级层窗口：关闭
+        const subCloseBtn = panelWrap.querySelector('.ad-sub-close');
+        if (subCloseBtn) subCloseBtn.addEventListener('click', closeSub);
 
         // 关键词
         const input = panelWrap.querySelector('.ad-input');
@@ -4064,18 +4089,74 @@
         panelWrap.style.top = top + 'px';
     }
 
-    function switchTab(name) {
-        if (!panelWrap) return;
-        currentTab = name;
+    const SUB_TITLES = {
+        tags: '屏蔽标签',
+        whitelist: '豁免标签',
+        elements: '屏蔽元素',
+        logs: '日志',
+        settings: '设置'
+    };
 
-        const pages = panelWrap.querySelectorAll('.ad-page');
+    // 打开三级层独立窗口
+    function openSub(name) {
+        if (!panelWrap || !subWrap) return;
+
+        const pages = subWrap.querySelectorAll('.ad-page');
         pages.forEach(p => {
             if (p.getAttribute('data-page') === name) p.removeAttribute('hidden');
             else p.setAttribute('hidden', '');
         });
 
+        const title = subWrap.querySelector('.ad-sub-title');
+        if (title) title.textContent = SUB_TITLES[name] || name;
+
+        subWrap.classList.add('open');
+
         if (name === 'logs') renderLogs();
-        if (name === 'home') updateEntryCounts();
+
+        requestAnimationFrame(positionSub);
+    }
+
+    function closeSub() {
+        if (subWrap) subWrap.classList.remove('open');
+    }
+
+    // 子窗口优先放主面板右侧，空间不足放左侧，再不够就贴右边
+    function positionSub() {
+        if (!subWrap || !panelWrap) return;
+        const panelEl = panelWrap.querySelector('#adskip-panel');
+        const subEl = subWrap.querySelector('#adskip-subpanel');
+        if (!panelEl || !subEl) return;
+
+        const pr = panelEl.getBoundingClientRect();
+        const sw = subEl.offsetWidth || 340;
+        const sh = subEl.offsetHeight || 360;
+        const gap = 10;
+
+        let left = pr.right + gap;
+        if (left + sw > window.innerWidth - 8) {
+            left = pr.left - gap - sw;
+        }
+        if (left < 8) left = Math.max(8, window.innerWidth - sw - 8);
+
+        let top = pr.top;
+        if (top + sh > window.innerHeight - 8) top = window.innerHeight - sh - 8;
+        if (top < 8) top = 8;
+
+        subWrap.style.left = left + 'px';
+        subWrap.style.top = top + 'px';
+    }
+
+    function switchTab(name) {
+        if (!panelWrap) return;
+        currentTab = name;
+
+        if (name === 'home' || !name) {
+            closeSub();
+            updateEntryCounts();
+            return;
+        }
+        openSub(name);
     }
 
     function openPanel() {
@@ -4105,6 +4186,8 @@
     function closePanel() {
         panelOpen = false;
         stopStatusLoop();
+        closeSub();
+        currentTab = 'home';
         if (fab) fab.classList.remove('open');
         if (panelWrap) {
             panelWrap.classList.remove('open');
