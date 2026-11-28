@@ -1,8 +1,8 @@
-﻿// ==UserScript==
+// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.2.0
-// @description  识别广告角标/购物锚点/自定义关键词，自动跳过广告视频；二级层为功能入口，屏蔽标签、豁免标签、元素屏蔽、广告屏蔽可分别开关
+// @version      7.3.0
+// @description  识别广告角标/购物锚点/广告文字/自定义关键词，自动跳过广告视频；二级层为功能入口，内置判定逐项可开关
 // @author       lead
 // @match        https://www.douyin.com/*
 // @grant        GM_setValue
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.2.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.3.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -292,6 +292,14 @@
         whitelistEnabled: 'adskip.v2.whitelistEnabled',
         elementEnabled: 'adskip.v2.elementEnabled',
         adsEnabled: 'adskip.v2.adsEnabled',
+        adBadgeEnabled: 'adskip.v2.adBadgeEnabled',
+        shopAnchorEnabled: 'adskip.v2.shopAnchorEnabled',
+        shopTextEnabled: 'adskip.v2.shopTextEnabled',
+        sameStyleEnabled: 'adskip.v2.sameStyleEnabled',
+        productCardEnabled: 'adskip.v2.productCardEnabled',
+        adTexts: 'adskip.v2.adTexts',
+        adTextLimit: 'adskip.v2.adTextLimit',
+        adTextEnabled: 'adskip.v2.adTextEnabled',
         subPos: 'adskip.v2.subPos',
         subW: 'adskip.v2.subW',
         subH: 'adskip.v2.subH',
@@ -365,6 +373,16 @@
         whitelistEnabled: store.get(KEYS.whitelistEnabled, true),
         elementEnabled: store.get(KEYS.elementEnabled, true),
         adsEnabled: store.get(KEYS.adsEnabled, true),
+        // 内置广告判定的逐项开关
+        adBadgeEnabled: store.get(KEYS.adBadgeEnabled, true),
+        shopAnchorEnabled: store.get(KEYS.shopAnchorEnabled, true),
+        shopTextEnabled: store.get(KEYS.shopTextEnabled, true),
+        sameStyleEnabled: store.get(KEYS.sameStyleEnabled, true),
+        productCardEnabled: store.get(KEYS.productCardEnabled, true),
+        // 广告文字（优先级等同于内置广告判定）
+        adTexts: [],
+        adTextLimit: clampNum(store.get(KEYS.adTextLimit, 60), 1, 1000000, 60),
+        adTextEnabled: store.get(KEYS.adTextEnabled, true),
         // 三级层子窗口：位置（null = 自动吸附主面板侧边）、宽、高（0 = 自适应）
         subPos: store.get(KEYS.subPos, null),
         subW: clampNum(store.get(KEYS.subW, 340), 240, 800, 340),
@@ -397,6 +415,7 @@
 
     state.keywords = normalizeKeywords(store.get(KEYS.keywords, []), state.keywordLimit);
     state.whitelist = normalizeKeywords(store.get(KEYS.whitelist, []), state.whitelistLimit);
+    state.adTexts = normalizeKeywords(store.get(KEYS.adTexts, []), state.adTextLimit);
 
     /* ---------- 关键词联合匹配器：一次扫描命中所有词 ---------- */
     let keywordRegex = null;
@@ -448,6 +467,29 @@
     function matchWhitelist(text) {
         if (!whitelistRegex || !text) return null;
         const m = text.match(whitelistRegex);
+        return m ? m[0] : null;
+    }
+
+    /* ---------- 广告文字匹配器：命中后按广告级处理 ---------- */
+    let adTextRegex = null;
+
+    function rebuildAdTextMatcher() {
+        const kws = state.adTexts;
+        if (!kws.length) {
+            adTextRegex = null;
+            return;
+        }
+        const sorted = kws.slice().sort((a, b) => b.length - a.length);
+        try {
+            adTextRegex = new RegExp(sorted.map(escapeRegExp).join('|'), 'i');
+        } catch (e) {
+            adTextRegex = null;
+        }
+    }
+
+    function matchAdText(text) {
+        if (!adTextRegex || !text) return null;
+        const m = text.match(adTextRegex);
         return m ? m[0] : null;
     }
 
@@ -959,20 +1001,32 @@
         }
     }
 
-    // 对可见文本做统一判定：购物标记 / 商品卡按钮 / 关键词
+    // 代码内置的广告判定，每一项受独立开关控制
+    function detectBuiltinAd(scope, text) {
+        const compact = String(text || '').replace(/\s+/g, '');
+
+        if (state.adBadgeEnabled && detectAdBadge(scope)) {
+            return { type: 'shop', detail: '广告：官方广告角标' };
+        }
+        if (state.shopAnchorEnabled && detectShopAnchor(scope)) {
+            return { type: 'shop', detail: '广告：购物锚点' };
+        }
+        if (state.shopTextEnabled && (detectShopText(scope) || /购物[|｜·]/.test(compact))) {
+            return { type: 'shop', detail: '广告：购物文本' };
+        }
+        if (state.sameStyleEnabled && compact.includes('视频同款')) {
+            return { type: 'shop', detail: '广告：视频同款' };
+        }
+        if (state.productCardEnabled && (detectProductCard(scope) || /查看详情|查看商品|立即购买|去购买|马上抢/.test(compact))) {
+            return { type: 'shop', detail: '广告：商品卡片' };
+        }
+        return null;
+    }
+
+    // 关键词判定（广告判定已抽到 detectBuiltinAd）
     function detectTextRules(text) {
         if (!text) return null;
 
-        const compact = text.replace(/\s+/g, '');
-
-        // 广告文本特征受「广告屏蔽」开关控制
-        if (state.adsEnabled) {
-            if (/购物[|｜·]/.test(compact)) return { type: 'shop', detail: '广告：购物文本' };
-            if (compact.includes('视频同款')) return { type: 'shop', detail: '广告：视频同款' };
-            if (/查看详情|查看商品|立即购买|去购买|马上抢/.test(compact)) return { type: 'shop', detail: '广告：商品卡片' };
-        }
-
-        // 屏蔽标签开关关闭时，关键词不再参与判定
         if (state.keywordEnabled) {
             const kw = matchKeyword(text);
             if (kw) return { type: 'keyword', detail: '标签：' + kw };
@@ -1020,23 +1074,19 @@
             }
         } catch (e) { /* ignore */ }
 
+        // 广告文字：优先级等同于内置广告判定
+        const adTextHit = state.adTextEnabled ? matchAdText(text) : null;
+
         // 豁免关键词优先级最高：命中就不再跳过。
-        // 但开启「豁免不覆盖广告」后，若同时存在明确的广告结构（购物锚点 /
-        // 购物文本 / 商品卡片按钮），则广告判定优先，豁免不再放行。
+        // 但开启「豁免不覆盖广告」后，内置广告判定与广告文字优先，豁免不再放行。
         // 豁免标签开关关闭时，整段豁免判定直接跳过。
         const exempt = state.whitelistEnabled ? matchWhitelist(text) : null;
 
         if (exempt) {
             if (state.exemptNotOverrideAds && state.adsEnabled) {
-                if (detectShopAnchor(scope)) {
-                    return { type: 'shop', detail: '广告：购物锚点（豁免不覆盖）' };
-                }
-                if (detectShopText(scope)) {
-                    return { type: 'shop', detail: '广告：购物文本（豁免不覆盖）' };
-                }
-                if (detectProductCard(scope)) {
-                    return { type: 'shop', detail: '广告：商品卡片（豁免不覆盖）' };
-                }
+                const builtin = detectBuiltinAd(scope, text);
+                if (builtin) return { type: builtin.type, detail: builtin.detail + '（豁免不覆盖）' };
+                if (adTextHit) return { type: 'shop', detail: '广告文字：' + adTextHit + '（豁免不覆盖）' };
             }
             return { type: 'exempt', detail: '豁免：' + exempt };
         }
@@ -1047,17 +1097,14 @@
             if (elemRule) return { type: 'element', detail: '元素：' + elemRule.label };
         }
 
-        // 2) 广告判定：官方角标 / 购物锚点（受「广告屏蔽」开关控制）
+        // 2) 广告：内置判定（逐项受控）+ 广告文字（受「广告屏蔽」总开关控制）
         if (state.adsEnabled) {
-            if (detectAdBadge(scope)) {
-                return { type: 'shop', detail: '广告：官方广告角标' };
-            }
-            if (detectShopAnchor(scope)) {
-                return { type: 'shop', detail: '广告：购物锚点' };
-            }
+            const builtin = detectBuiltinAd(scope, text);
+            if (builtin) return builtin;
+            if (adTextHit) return { type: 'shop', detail: '广告文字：' + adTextHit };
         }
 
-        // 3) 可见文本综合判定（内部再按开关区分广告文本与关键词）
+        // 3) 用户关键词
         return detectTextRules(text);
     }
 
@@ -1088,6 +1135,7 @@
     let logView = 'diag';
     let keywordFilter = '';
     let whitelistFilter = '';
+    let adTextFilter = '';
 
     /* ---------- 可读日志：只记录跳过事件 ---------- */
     const readableLogs = [];
@@ -1708,6 +1756,32 @@
         .ad-entry-desc { flex: 1; font-size: 10px; color: #6f6f78; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .ad-entry-arrow { flex: none; color: #6f6f78; font-size: 15px; line-height: 1; }
 
+        /* 广告屏蔽页：内置判定分条 */
+        .ad-sec-title {
+            font-size: 10px;
+            color: #6f6f78;
+        }
+        .ad-feat {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 10px;
+            border-radius: 8px;
+            background: rgba(255,255,255,.03);
+            border: 1px solid rgba(255,255,255,.05);
+        }
+        .ad-feat-name { flex: none; font-size: 12px; color: #d8d8de; }
+        .ad-feat-desc { flex: 1; font-size: 10px; color: #6f6f78; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .ad-feat .ad-mini-switch { flex: none; }
+
+        .ad-tag.adtext {
+            background: rgba(245,158,11,.14);
+            border-color: rgba(251,191,36,.3);
+            color: #fcd34d;
+        }
+        .ad-tag.adtext i { color: #fbbf24; }
+        .ad-tag.adtext i:hover { color: #fff; background: rgba(245,158,11,.55); }
+
         /* 三级层：独立子窗口 */
         #adskip-subwrap {
             position: fixed;
@@ -1812,6 +1886,8 @@
         .ad-page.off .ad-tags-head,
         .ad-page.off .ad-tags,
         .ad-page.off .ad-elements,
+        .ad-page.off .ad-feat,
+        .ad-page.off .ad-sec-title,
         .ad-page.off .ad-tip { opacity: .45; }
 
         .ad-resize-handle {
@@ -2509,10 +2585,11 @@
                         <button class="ad-mini-switch ad-elem-on" type="button" role="switch"><i></i></button>
                         <span class="ad-entry-arrow">›</span>
                     </div>
-                    <div class="ad-entry no-nav">
+                    <div class="ad-entry" data-target="ads">
                         <span class="ad-entry-name">广告屏蔽</span>
-                        <span class="ad-entry-desc">官方角标 / 购物锚点 / 商品卡</span>
+                        <span class="ad-entry-count" data-count="adtext">0</span>
                         <button class="ad-mini-switch ad-ads-on" type="button" role="switch"><i></i></button>
+                        <span class="ad-entry-arrow">›</span>
                     </div>
                     <div class="ad-entry" data-target="logs">
                         <span class="ad-entry-name">日志</span>
@@ -2563,6 +2640,49 @@
                     <div class="ad-tip">在页面上右键任意元素：选「屏蔽此标签文字」加入屏蔽标签，选「豁免此标签文字」加入豁免，选「屏蔽此元素」记成元素规则。</div>
                     <div class="ad-tags-head">已记录 <b class="ad-elem-count">0</b> 条规则（上限 100 万）</div>
                     <div class="ad-elements"></div>
+                </div>
+
+                <div class="ad-page ad-sub" data-page="ads" hidden>
+                    <div class="ad-sec-title">内置判定</div>
+                    <div class="ad-feat">
+                        <span class="ad-feat-name">官方广告角标</span>
+                        <span class="ad-feat-desc">作者行 30×16 SVG</span>
+                        <button class="ad-mini-switch ad-f-badge" type="button" role="switch"><i></i></button>
+                    </div>
+                    <div class="ad-feat">
+                        <span class="ad-feat-name">购物锚点</span>
+                        <span class="ad-feat-desc">播放器购物链接</span>
+                        <button class="ad-mini-switch ad-f-anchor" type="button" role="switch"><i></i></button>
+                    </div>
+                    <div class="ad-feat">
+                        <span class="ad-feat-name">购物文本</span>
+                        <span class="ad-feat-desc">「购物 | …」样式</span>
+                        <button class="ad-mini-switch ad-f-shoptext" type="button" role="switch"><i></i></button>
+                    </div>
+                    <div class="ad-feat">
+                        <span class="ad-feat-name">视频同款</span>
+                        <span class="ad-feat-desc">含「视频同款」字样</span>
+                        <button class="ad-mini-switch ad-f-samestyle" type="button" role="switch"><i></i></button>
+                    </div>
+                    <div class="ad-feat">
+                        <span class="ad-feat-name">商品卡片</span>
+                        <span class="ad-feat-desc">查看详情 / 立即购买</span>
+                        <button class="ad-mini-switch ad-f-card" type="button" role="switch"><i></i></button>
+                    </div>
+
+                    <div class="ad-sec-title" style="margin-top:8px">广告文字</div>
+                    <div class="ad-toggle-row" style="padding-left:2px">
+                        <span class="ad-toggle-label">启用广告文字<span>关闭后此列表不参与判定</span></span>
+                        <button class="ad-mini-switch ad-f-adtext" type="button" role="switch"><i></i></button>
+                    </div>
+                    <div class="ad-input-row">
+                        <input class="ad-input ad-adtext-input" type="text" maxlength="40" placeholder="输入广告文字，回车添加">
+                        <button class="ad-add ad-adtext-add" type="button">添加</button>
+                    </div>
+                    <input class="ad-search ad-adtext-search" type="text" placeholder="搜索已添加的广告文字…">
+                    <div class="ad-tags-head">已添加 <b class="ad-text-count">0 / 60</b>（新词在最前）</div>
+                    <div class="ad-tags ad-adtext-tags"></div>
+                    <div class="ad-tip">命中后按广告处理，优先级等同于内置判定：开启「豁免不覆盖广告」时，可以压过豁免词。</div>
                 </div>
 
                 <div class="ad-page ad-sub" data-page="logs" hidden>
@@ -2862,6 +2982,14 @@
             store.del(KEYS.whitelistEnabled);
             store.del(KEYS.elementEnabled);
             store.del(KEYS.adsEnabled);
+            store.del(KEYS.adBadgeEnabled);
+            store.del(KEYS.shopAnchorEnabled);
+            store.del(KEYS.shopTextEnabled);
+            store.del(KEYS.sameStyleEnabled);
+            store.del(KEYS.productCardEnabled);
+            store.del(KEYS.adTexts);
+            store.del(KEYS.adTextLimit);
+            store.del(KEYS.adTextEnabled);
             store.del(KEYS.subPos);
             store.del(KEYS.subW);
             store.del(KEYS.subH);
@@ -2883,6 +3011,14 @@
             state.whitelistEnabled = true;
             state.elementEnabled = true;
             state.adsEnabled = true;
+            state.adBadgeEnabled = true;
+            state.shopAnchorEnabled = true;
+            state.shopTextEnabled = true;
+            state.sameStyleEnabled = true;
+            state.productCardEnabled = true;
+            state.adTexts = [];
+            state.adTextEnabled = true;
+            state.adTextLimit = 60;
             syncToggleUI();
             applyPanelSize();
             applySize(state.size);
@@ -3076,6 +3212,71 @@
             });
         }
 
+        // 广告屏蔽页：内置判定逐项开关
+        const bindAdFeat = (sel, key, label) => {
+            const btn = panelWrap.querySelector(sel);
+            if (!btn) return;
+            btn.addEventListener('click', () => {
+                state[key] = !state[key];
+                store.set(KEYS[key], state[key]);
+                syncToggleUI();
+                toast(label + (state[key] ? ' 已开启' : ' 已关闭'));
+                check();
+            });
+        };
+        bindAdFeat('.ad-f-badge', 'adBadgeEnabled', '官方广告角标');
+        bindAdFeat('.ad-f-anchor', 'shopAnchorEnabled', '购物锚点');
+        bindAdFeat('.ad-f-shoptext', 'shopTextEnabled', '购物文本');
+        bindAdFeat('.ad-f-samestyle', 'sameStyleEnabled', '视频同款');
+        bindAdFeat('.ad-f-card', 'productCardEnabled', '商品卡片');
+        bindAdFeat('.ad-f-adtext', 'adTextEnabled', '广告文字');
+
+        // 广告文字：添加 / 搜索
+        const adTextInput = panelWrap.querySelector('.ad-adtext-input');
+        const adTextAdd = panelWrap.querySelector('.ad-adtext-add');
+
+        const submitAdText = () => {
+            if (!adTextInput) return;
+            const raw = adTextInput.value.trim();
+            if (!raw) return;
+
+            const exists = state.adTexts.some(k => k.toLowerCase() === raw.toLowerCase());
+            if (exists) {
+                toast('广告文字已存在：' + raw);
+                return;
+            }
+            if (state.adTexts.length >= state.adTextLimit) {
+                toast('广告文字已达上限 ' + state.adTextLimit + ' 个');
+                return;
+            }
+
+            state.adTexts = normalizeKeywords([raw].concat(state.adTexts), state.adTextLimit);
+            store.set(KEYS.adTexts, state.adTexts);
+            adTextInput.value = '';
+            renderAdTexts();
+            toast('已添加广告文字：' + raw);
+            check();
+        };
+
+        if (adTextAdd) adTextAdd.addEventListener('click', submitAdText);
+        if (adTextInput) {
+            adTextInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    submitAdText();
+                }
+            });
+        }
+
+        const adTextSearch = panelWrap.querySelector('.ad-adtext-search');
+        if (adTextSearch) {
+            adTextSearch.addEventListener('input', () => {
+                adTextFilter = adTextSearch.value;
+                renderAdTexts();
+            });
+        }
+
         // 跳过提示开关
         const skipToastBtn = panelWrap.querySelector('.ad-skiptoast');
         if (skipToastBtn) {
@@ -3189,6 +3390,7 @@
         renderTags();
         renderWhitelist();
         renderElementRules();
+        renderAdTexts();
         renderLogs();
         updateStat();
         syncEnabledUI();
@@ -3213,6 +3415,12 @@
         const wlOn = panelWrap && panelWrap.querySelector('.ad-wl-on');
         const elemOn = panelWrap && panelWrap.querySelector('.ad-elem-on');
         const adsOn = panelWrap && panelWrap.querySelector('.ad-ads-on');
+        const adBadge = panelWrap && panelWrap.querySelector('.ad-f-badge');
+        const adAnchor = panelWrap && panelWrap.querySelector('.ad-f-anchor');
+        const adShopText = panelWrap && panelWrap.querySelector('.ad-f-shoptext');
+        const adSameStyle = panelWrap && panelWrap.querySelector('.ad-f-samestyle');
+        const adCard = panelWrap && panelWrap.querySelector('.ad-f-card');
+        const adTextOn = panelWrap && panelWrap.querySelector('.ad-f-adtext');
         if (flip) flip.classList.toggle('on', !!state.flipDirection);
         if (giveup) giveup.classList.toggle('on', !!state.giveUpOnFail);
         if (pick) pick.classList.toggle('on', !!state.pickEnabled);
@@ -3224,6 +3432,12 @@
         if (wlOn) wlOn.classList.toggle('on', !!state.whitelistEnabled);
         if (elemOn) elemOn.classList.toggle('on', !!state.elementEnabled);
         if (adsOn) adsOn.classList.toggle('on', !!state.adsEnabled);
+        if (adBadge) adBadge.classList.toggle('on', !!state.adBadgeEnabled);
+        if (adAnchor) adAnchor.classList.toggle('on', !!state.shopAnchorEnabled);
+        if (adShopText) adShopText.classList.toggle('on', !!state.shopTextEnabled);
+        if (adSameStyle) adSameStyle.classList.toggle('on', !!state.sameStyleEnabled);
+        if (adCard) adCard.classList.toggle('on', !!state.productCardEnabled);
+        if (adTextOn) adTextOn.classList.toggle('on', !!state.adTextEnabled);
 
         syncPageDim();
         updateEntryCounts();
@@ -3239,6 +3453,7 @@
         set('kw', state.keywords.length);
         set('wl', state.whitelist.length);
         set('elem', state.elementRules.length);
+        set('adtext', state.adTexts.length);
     }
 
     // 开关关闭时把对应页面调暗，提示当前不参与判定
@@ -3247,7 +3462,8 @@
         [
             ['tags', state.keywordEnabled],
             ['whitelist', state.whitelistEnabled],
-            ['elements', state.elementEnabled]
+            ['elements', state.elementEnabled],
+            ['ads', state.adsEnabled]
         ].forEach(([name, on]) => {
             const el = panelWrap.querySelector('.ad-page[data-page="' + name + '"]');
             if (el) el.classList.toggle('off', !on);
@@ -3506,6 +3722,8 @@
                 keywordLimit: state.keywordLimit,
                 whitelist: state.whitelist.slice(),
                 elementRules: state.elementRules.slice(),
+                adTexts: state.adTexts.slice(),
+                adTextLimit: state.adTextLimit,
                 whitelistLimit: state.whitelistLimit,
                 maxPerMinute: state.maxPerMinute,
                 panelWidth: state.panelW,
@@ -3530,7 +3748,13 @@
                     keywordEnabled: !!state.keywordEnabled,
                     whitelistEnabled: !!state.whitelistEnabled,
                     elementEnabled: !!state.elementEnabled,
-                    adsEnabled: !!state.adsEnabled
+                    adsEnabled: !!state.adsEnabled,
+                    adBadgeEnabled: !!state.adBadgeEnabled,
+                    shopAnchorEnabled: !!state.shopAnchorEnabled,
+                    shopTextEnabled: !!state.shopTextEnabled,
+                    sameStyleEnabled: !!state.sameStyleEnabled,
+                    productCardEnabled: !!state.productCardEnabled,
+                    adTextEnabled: !!state.adTextEnabled
                 }
             }
         };
@@ -3586,6 +3810,14 @@
             state.elementRules = normalizeRules(d.elementRules);
             store.set(KEYS.elementRules, state.elementRules);
         }
+        if (typeof d.adTextLimit === 'number') {
+            state.adTextLimit = clampNum(d.adTextLimit, 1, 1000000, state.adTextLimit);
+            store.set(KEYS.adTextLimit, state.adTextLimit);
+        }
+        if (Array.isArray(d.adTexts)) {
+            state.adTexts = normalizeKeywords(d.adTexts, state.adTextLimit);
+            store.set(KEYS.adTexts, state.adTexts);
+        }
         if (typeof d.panelWidth === 'number') {
             state.panelW = clampNum(d.panelWidth, 200, 1200, state.panelW);
             store.set(KEYS.panelW, state.panelW);
@@ -3615,6 +3847,12 @@
         if (typeof o.whitelistEnabled === 'boolean') { state.whitelistEnabled = o.whitelistEnabled; store.set(KEYS.whitelistEnabled, state.whitelistEnabled); }
         if (typeof o.elementEnabled === 'boolean') { state.elementEnabled = o.elementEnabled; store.set(KEYS.elementEnabled, state.elementEnabled); }
         if (typeof o.adsEnabled === 'boolean') { state.adsEnabled = o.adsEnabled; store.set(KEYS.adsEnabled, state.adsEnabled); }
+        if (typeof o.adBadgeEnabled === 'boolean') { state.adBadgeEnabled = o.adBadgeEnabled; store.set(KEYS.adBadgeEnabled, state.adBadgeEnabled); }
+        if (typeof o.shopAnchorEnabled === 'boolean') { state.shopAnchorEnabled = o.shopAnchorEnabled; store.set(KEYS.shopAnchorEnabled, state.shopAnchorEnabled); }
+        if (typeof o.shopTextEnabled === 'boolean') { state.shopTextEnabled = o.shopTextEnabled; store.set(KEYS.shopTextEnabled, state.shopTextEnabled); }
+        if (typeof o.sameStyleEnabled === 'boolean') { state.sameStyleEnabled = o.sameStyleEnabled; store.set(KEYS.sameStyleEnabled, state.sameStyleEnabled); }
+        if (typeof o.productCardEnabled === 'boolean') { state.productCardEnabled = o.productCardEnabled; store.set(KEYS.productCardEnabled, state.productCardEnabled); }
+        if (typeof o.adTextEnabled === 'boolean') { state.adTextEnabled = o.adTextEnabled; store.set(KEYS.adTextEnabled, state.adTextEnabled); }
         if (o.nextArrowDir === 1 || o.nextArrowDir === -1 || o.nextArrowDir === 0) {
             state.nextArrowDir = o.nextArrowDir;
             store.set(KEYS.nextArrowDir, state.nextArrowDir);
@@ -3802,6 +4040,71 @@
         toast('已存在：' + kw);
     }
 
+    function renderAdTexts() {
+        rebuildAdTextMatcher();
+
+        const box = panelWrap && panelWrap.querySelector('.ad-adtext-tags');
+        if (!box) return;
+
+        const countEl = panelWrap.querySelector('.ad-text-count');
+        const q = adTextFilter.trim().toLowerCase();
+        const list = q ? state.adTexts.filter(k => k.toLowerCase().includes(q)) : state.adTexts;
+
+        if (countEl) {
+            countEl.textContent = q
+                ? '匹配 ' + list.length + ' / ' + state.adTexts.length
+                : state.adTexts.length + ' / ' + state.adTextLimit;
+        }
+
+        box.innerHTML = '';
+
+        if (!state.adTexts.length) {
+            const empty = document.createElement('div');
+            empty.className = 'ad-empty';
+            empty.textContent = '暂无广告文字（命中后按广告处理）';
+            box.appendChild(empty);
+            box.scrollTop = 0;
+            updateEntryCounts();
+            return;
+        }
+
+        if (!list.length) {
+            const empty = document.createElement('div');
+            empty.className = 'ad-empty';
+            empty.textContent = '没有匹配的标签';
+            box.appendChild(empty);
+            box.scrollTop = 0;
+            updateEntryCounts();
+            return;
+        }
+
+        list.forEach(kw => {
+            const tag = document.createElement('span');
+            tag.className = 'ad-tag adtext';
+
+            const label = document.createElement('span');
+            label.textContent = kw;
+            label.title = kw;
+
+            const del = document.createElement('i');
+            del.textContent = '×';
+            del.title = '删除';
+            del.addEventListener('click', () => {
+                state.adTexts = state.adTexts.filter(k => k !== kw);
+                store.set(KEYS.adTexts, state.adTexts);
+                renderAdTexts();
+                toast('已移除：' + kw);
+            });
+
+            tag.appendChild(label);
+            tag.appendChild(del);
+            box.appendChild(tag);
+        });
+
+        box.scrollTop = 0;
+        updateEntryCounts();
+    }
+
     function renderTags() {
         rebuildKeywordMatcher();
 
@@ -3979,10 +4282,17 @@
                 keywordEnabled: !!state.keywordEnabled,
                 whitelistEnabled: !!state.whitelistEnabled,
                 elementEnabled: !!state.elementEnabled,
-                adsEnabled: !!state.adsEnabled
+                adsEnabled: !!state.adsEnabled,
+                adBadgeEnabled: !!state.adBadgeEnabled,
+                shopAnchorEnabled: !!state.shopAnchorEnabled,
+                shopTextEnabled: !!state.shopTextEnabled,
+                sameStyleEnabled: !!state.sameStyleEnabled,
+                productCardEnabled: !!state.productCardEnabled,
+                adTextEnabled: !!state.adTextEnabled
             },
             elementRules: state.elementRules.map(r => r.label || r.selector || r.text),
             whitelist: state.whitelist.slice(),
+            adTexts: state.adTexts.slice(),
             settings: {
                 detectDelay: state.detectDelay,
                 cooldown: state.cooldown,
@@ -4148,6 +4458,7 @@
         tags: '屏蔽标签',
         whitelist: '豁免标签',
         elements: '屏蔽元素',
+        ads: '广告屏蔽',
         logs: '日志',
         settings: '设置'
     };
@@ -4347,6 +4658,7 @@
         renderTags();
         renderWhitelist();
         renderElementRules();
+        renderAdTexts();
         if (currentTab === 'logs') renderLogs();
         syncEnabledUI();
         startStatusLoop();
