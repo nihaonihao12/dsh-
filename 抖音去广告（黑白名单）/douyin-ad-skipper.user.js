@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.1.0
+// @version      7.2.0
 // @description  识别广告角标/购物锚点/自定义关键词，自动跳过广告视频；二级层为功能入口，屏蔽标签、豁免标签、元素屏蔽、广告屏蔽可分别开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.1.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.2.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -292,6 +292,9 @@
         whitelistEnabled: 'adskip.v2.whitelistEnabled',
         elementEnabled: 'adskip.v2.elementEnabled',
         adsEnabled: 'adskip.v2.adsEnabled',
+        subPos: 'adskip.v2.subPos',
+        subW: 'adskip.v2.subW',
+        subH: 'adskip.v2.subH',
         whitelist: 'adskip.v2.whitelist',
         panelW: 'adskip.v2.panelW',
         panelH: 'adskip.v2.panelH'
@@ -362,6 +365,10 @@
         whitelistEnabled: store.get(KEYS.whitelistEnabled, true),
         elementEnabled: store.get(KEYS.elementEnabled, true),
         adsEnabled: store.get(KEYS.adsEnabled, true),
+        // 三级层子窗口：位置（null = 自动吸附主面板侧边）、宽、高（0 = 自适应）
+        subPos: store.get(KEYS.subPos, null),
+        subW: clampNum(store.get(KEYS.subW, 340), 240, 800, 340),
+        subH: clampNum(store.get(KEYS.subH, 0), 0, 4000, 0),
         maxPerMinute: clampNum(store.get(KEYS.maxPerMinute, 40), 1, 10000, 40),
         enabled: store.get(KEYS.enabled, true),
         flipDirection: store.get(KEYS.flipDirection, false),
@@ -1715,6 +1722,7 @@
             width: 100%;
             max-height: 78vh;
             box-sizing: border-box;
+            position: relative;
             display: flex;
             flex-direction: column;
             background: rgba(26,26,31,.98);
@@ -1731,6 +1739,43 @@
             transition: opacity .16s ease, transform .16s ease;
         }
         #adskip-subwrap.open #adskip-subpanel { opacity: 1; transform: none; }
+
+        .ad-sub-drag {
+            flex: none;
+            background: none;
+            border: 0;
+            color: #6f6f78;
+            font-size: 13px;
+            line-height: 1;
+            cursor: grab;
+            padding: 2px 5px;
+            border-radius: 4px;
+            touch-action: none;
+        }
+        .ad-sub-drag:hover { color: #c9c9d0; background: rgba(255,255,255,.08); }
+        .ad-sub-drag.dragging { cursor: grabbing; }
+
+        .ad-sub-resize {
+            position: absolute;
+            right: 0;
+            bottom: 0;
+            width: 16px;
+            height: 16px;
+            cursor: nwse-resize;
+            touch-action: none;
+            z-index: 3;
+        }
+        .ad-sub-resize::after {
+            content: '';
+            position: absolute;
+            right: 3px;
+            bottom: 3px;
+            width: 7px;
+            height: 7px;
+            border-right: 2px solid rgba(255,255,255,.2);
+            border-bottom: 2px solid rgba(255,255,255,.2);
+        }
+        .ad-sub-resize:hover::after { border-color: rgba(96,165,250,.7); }
 
         .ad-sub-head {
             display: flex;
@@ -2487,6 +2532,7 @@
             <div id="adskip-subwrap">
                 <div id="adskip-subpanel">
                     <div class="ad-sub-head">
+                        <button class="ad-sub-drag" type="button" title="按住拖动（双击恢复自动吸附）">⠿</button>
                         <b class="ad-sub-title">功能</b>
                         <button class="ad-sub-close" type="button" title="关闭">×</button>
                     </div>
@@ -2635,9 +2681,9 @@
                         <button class="ad-import" type="button">导入配置</button>
                     </div>
                 </div>
-                </div>
-            </div>
 
+                    <div class="ad-sub-resize" title="拖动调整大小"></div>
+                </div>
             </div>
         `;
         document.body.appendChild(panelWrap);
@@ -2816,6 +2862,9 @@
             store.del(KEYS.whitelistEnabled);
             store.del(KEYS.elementEnabled);
             store.del(KEYS.adsEnabled);
+            store.del(KEYS.subPos);
+            store.del(KEYS.subW);
+            store.del(KEYS.subH);
             state.pos = null;
             state.size = DEFAULTS.size;
             state.opacity = DEFAULTS.opacity;
@@ -2825,6 +2874,9 @@
             state.pollMs = 500;
             state.panelW = 288;
             state.panelH = 0;
+            state.subPos = null;
+            state.subW = 340;
+            state.subH = 0;
             state.maxPerMinute = 40;
             state.exemptNotOverrideAds = false;
             state.keywordEnabled = true;
@@ -3144,6 +3196,9 @@
 
         applyPanelSize();
         bindPanelResize();
+        applySubSize();
+        bindSubDrag();
+        bindSubResize();
     }
 
     function syncToggleUI() {
@@ -4110,6 +4165,7 @@
         const title = subWrap.querySelector('.ad-sub-title');
         if (title) title.textContent = SUB_TITLES[name] || name;
 
+        applySubSize();
         subWrap.classList.add('open');
 
         if (name === 'logs') renderLogs();
@@ -4121,16 +4177,43 @@
         if (subWrap) subWrap.classList.remove('open');
     }
 
-    // 子窗口优先放主面板右侧，空间不足放左侧，再不够就贴右边
+    // 应用子窗口尺寸（高度 0 = 自适应内容）
+    function applySubSize() {
+        if (!subWrap) return;
+        const subEl = subWrap.querySelector('#adskip-subpanel');
+        if (!subEl) return;
+
+        subWrap.style.width = state.subW + 'px';
+
+        if (state.subH > 0) {
+            subEl.style.height = state.subH + 'px';
+            subEl.style.maxHeight = 'none';
+        } else {
+            subEl.style.height = '';
+            subEl.style.maxHeight = '';
+        }
+    }
+
+    // 子窗口定位：用户拖动过就用记忆位置，否则动态吸附在主面板侧边
     function positionSub() {
         if (!subWrap || !panelWrap) return;
-        const panelEl = panelWrap.querySelector('#adskip-panel');
         const subEl = subWrap.querySelector('#adskip-subpanel');
-        if (!panelEl || !subEl) return;
+        if (!subEl) return;
 
-        const pr = panelEl.getBoundingClientRect();
-        const sw = subEl.offsetWidth || 340;
+        const sw = subEl.offsetWidth || state.subW;
         const sh = subEl.offsetHeight || 360;
+
+        if (state.subPos && typeof state.subPos.left === 'number' && typeof state.subPos.top === 'number') {
+            const left = Math.max(4, Math.min(state.subPos.left, window.innerWidth - sw - 4));
+            const top = Math.max(4, Math.min(state.subPos.top, window.innerHeight - sh - 4));
+            subWrap.style.left = left + 'px';
+            subWrap.style.top = top + 'px';
+            return;
+        }
+
+        const panelEl = panelWrap.querySelector('#adskip-panel');
+        if (!panelEl) return;
+        const pr = panelEl.getBoundingClientRect();
         const gap = 10;
 
         let left = pr.right + gap;
@@ -4145,6 +4228,99 @@
 
         subWrap.style.left = left + 'px';
         subWrap.style.top = top + 'px';
+    }
+
+    // 标题栏拖拽按钮：按住拖动，松开记忆位置；双击恢复自动吸附
+    function bindSubDrag() {
+        if (!subWrap) return;
+        const btn = subWrap.querySelector('.ad-sub-drag');
+        const subEl = subWrap.querySelector('#adskip-subpanel');
+        if (!btn || !subEl) return;
+
+        let start = null;
+
+        btn.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const r = subEl.getBoundingClientRect();
+            start = { x: e.clientX, y: e.clientY, left: r.left, top: r.top };
+            btn.classList.add('dragging');
+            try { btn.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        });
+
+        btn.addEventListener('pointermove', (e) => {
+            if (!start) return;
+            const maxLeft = window.innerWidth - subEl.offsetWidth - 4;
+            const maxTop = window.innerHeight - subEl.offsetHeight - 4;
+            const left = Math.max(4, Math.min(start.left + (e.clientX - start.x), maxLeft));
+            const top = Math.max(4, Math.min(start.top + (e.clientY - start.y), maxTop));
+            subWrap.style.left = left + 'px';
+            subWrap.style.top = top + 'px';
+        });
+
+        btn.addEventListener('pointerup', () => {
+            if (!start) return;
+            start = null;
+            btn.classList.remove('dragging');
+            const r = subEl.getBoundingClientRect();
+            state.subPos = { left: Math.round(r.left), top: Math.round(r.top) };
+            store.set(KEYS.subPos, state.subPos);
+            toast('已记住子窗口位置');
+        });
+
+        btn.addEventListener('pointercancel', () => {
+            start = null;
+            btn.classList.remove('dragging');
+        });
+
+        btn.addEventListener('dblclick', () => {
+            state.subPos = null;
+            store.del(KEYS.subPos);
+            positionSub();
+            toast('已恢复自动吸附');
+        });
+    }
+
+    // 右下角拖拽手柄：调整子窗口宽高，松手记忆
+    function bindSubResize() {
+        if (!subWrap) return;
+        const handle = subWrap.querySelector('.ad-sub-resize');
+        const subEl = subWrap.querySelector('#adskip-subpanel');
+        if (!handle || !subEl) return;
+
+        let start = null;
+
+        handle.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const r = subEl.getBoundingClientRect();
+            start = { x: e.clientX, y: e.clientY, w: r.width, h: r.height };
+            try { handle.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        });
+
+        handle.addEventListener('pointermove', (e) => {
+            if (!start) return;
+            const maxH = Math.max(220, window.innerHeight - 40);
+            const w = clampNum(start.w + (e.clientX - start.x), 240, 800, start.w);
+            const h = clampNum(start.h + (e.clientY - start.y), 220, maxH, start.h);
+
+            state.subW = w;
+            state.subH = h;
+
+            applySubSize();
+            positionSub();
+        });
+
+        handle.addEventListener('pointerup', () => {
+            if (!start) return;
+            start = null;
+            store.set(KEYS.subW, state.subW);
+            store.set(KEYS.subH, state.subH);
+        });
+
+        handle.addEventListener('pointercancel', () => {
+            start = null;
+        });
     }
 
     function switchTab(name) {
