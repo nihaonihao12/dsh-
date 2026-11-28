@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.8.0
+// @version      7.8.1
 // @description  识别广告角标/购物锚点/广告文字/自定义关键词，自动跳过广告视频；二级层为功能入口，内置判定逐项可开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.8.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.8.1 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -2710,6 +2710,37 @@
         store.set(KEYS.pos, state.pos);
     }
 
+    // 位置兜底：保存前先确保在屏幕内，避免存下非法坐标
+    function savePosSafe() {
+        clampFab();
+        savePos();
+    }
+
+    // 启动自检：位置记忆异常（浮窗被存到屏幕外）时重置到默认位置，
+    // 避免用户"找不到浮窗"。布局没完成时会重试。
+    function ensureFabVisible(retry) {
+        if (!fab) return;
+
+        const r = fab.getBoundingClientRect();
+        if (!r.width || !r.height) {
+            if ((retry || 0) < 5) {
+                setTimeout(() => ensureFabVisible((retry || 0) + 1), 120);
+            }
+            return;
+        }
+
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const outside = r.right <= 0 || r.bottom <= 0 || r.left >= vw || r.top >= vh;
+
+        if (outside) {
+            state.pos = null;
+            store.del(KEYS.pos);
+            applyPosition();
+            log('浮窗在屏幕外，已重置到默认位置');
+        }
+    }
+
     function bindFabDrag() {
         let down = null;
         let moved = false;
@@ -2754,7 +2785,7 @@
             fab.classList.remove('dragging');
 
             if (wasMoved) {
-                savePos();
+                savePosSafe();
                 return;
             }
 
@@ -5161,6 +5192,9 @@
         } catch (e) { /* ignore */ }
 
         loop();
+
+        // 浮窗位置自检（布局可能还没完成，内部会重试）
+        ensureFabVisible(0);
 
         log('已加载 | 状态: ' + (state.enabled ? '开启' : '暂停') + ' | 关键词: ' + state.keywords.length + ' 个');
         log('判定: 购物锚点 / 商品卡片 / 关键词 → 翻页按钮 | nextArrowDir: ' + state.nextArrowDir);
