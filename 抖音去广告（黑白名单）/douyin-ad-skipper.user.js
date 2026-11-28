@@ -1,8 +1,8 @@
 ﻿// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      6.0.0
-// @description  识别购物锚点与自定义关键词，自动跳过广告视频；浮窗可拖动/调大小/调透明度，二级面板管理屏蔽标签
+// @version      7.0.0
+// @description  识别广告角标/购物锚点/自定义关键词，自动跳过广告视频；二级层为功能入口，屏蔽标签、豁免标签、元素屏蔽、广告屏蔽可分别开关
 // @author       lead
 // @match        https://www.douyin.com/*
 // @grant        GM_setValue
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v6.0.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.0.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -288,6 +288,10 @@
         showSkipToast: 'adskip.v2.showSkipToast',
         exemptNotOverrideAds: 'adskip.v2.exemptNotOverrideAds',
         maxPerMinute: 'adskip.v2.maxPerMinute',
+        keywordEnabled: 'adskip.v2.keywordEnabled',
+        whitelistEnabled: 'adskip.v2.whitelistEnabled',
+        elementEnabled: 'adskip.v2.elementEnabled',
+        adsEnabled: 'adskip.v2.adsEnabled',
         whitelist: 'adskip.v2.whitelist',
         panelW: 'adskip.v2.panelW',
         panelH: 'adskip.v2.panelH'
@@ -353,6 +357,11 @@
         whitelistLimit: clampNum(store.get(KEYS.whitelistLimit, 60), 1, 1000000, 60),
         showSkipToast: store.get(KEYS.showSkipToast, true),
         exemptNotOverrideAds: store.get(KEYS.exemptNotOverrideAds, false),
+        // 三个独立开关：屏蔽标签 / 豁免标签 / 元素屏蔽
+        keywordEnabled: store.get(KEYS.keywordEnabled, true),
+        whitelistEnabled: store.get(KEYS.whitelistEnabled, true),
+        elementEnabled: store.get(KEYS.elementEnabled, true),
+        adsEnabled: store.get(KEYS.adsEnabled, true),
         maxPerMinute: clampNum(store.get(KEYS.maxPerMinute, 40), 1, 10000, 40),
         enabled: store.get(KEYS.enabled, true),
         flipDirection: store.get(KEYS.flipDirection, false),
@@ -791,7 +800,10 @@
             renderTags();
         }
 
-        toast('已' + label + '标签：' + text);
+        const offHint = isExempt
+            ? (state.whitelistEnabled ? '' : '（豁免开关已关闭，暂时不生效）')
+            : (state.keywordEnabled ? '' : '（屏蔽开关已关闭，暂时不生效）');
+        toast('已' + label + '标签：' + text + offHint);
         check();
     }
 
@@ -814,7 +826,7 @@
         state.elementRules = state.elementRules.concat([rule]).slice(-1000000);
         store.set(KEYS.elementRules, state.elementRules);
         renderElementRules();
-        toast('已添加元素屏蔽：' + rule.label);
+        toast('已添加元素屏蔽：' + rule.label + (state.elementEnabled ? '' : '（元素屏蔽开关已关闭，暂时不生效）'));
         check();
     }
 
@@ -946,12 +958,18 @@
 
         const compact = text.replace(/\s+/g, '');
 
-        if (/购物[|｜·]/.test(compact)) return { type: 'shop', detail: '广告：购物文本' };
-        if (compact.includes('视频同款')) return { type: 'shop', detail: '广告：视频同款' };
-        if (/查看详情|查看商品|立即购买|去购买|马上抢/.test(compact)) return { type: 'shop', detail: '广告：商品卡片' };
+        // 广告文本特征受「广告屏蔽」开关控制
+        if (state.adsEnabled) {
+            if (/购物[|｜·]/.test(compact)) return { type: 'shop', detail: '广告：购物文本' };
+            if (compact.includes('视频同款')) return { type: 'shop', detail: '广告：视频同款' };
+            if (/查看详情|查看商品|立即购买|去购买|马上抢/.test(compact)) return { type: 'shop', detail: '广告：商品卡片' };
+        }
 
-        const kw = matchKeyword(text);
-        if (kw) return { type: 'keyword', detail: '标签：' + kw };
+        // 屏蔽标签开关关闭时，关键词不再参与判定
+        if (state.keywordEnabled) {
+            const kw = matchKeyword(text);
+            if (kw) return { type: 'keyword', detail: '标签：' + kw };
+        }
 
         return null;
     }
@@ -998,10 +1016,11 @@
         // 豁免关键词优先级最高：命中就不再跳过。
         // 但开启「豁免不覆盖广告」后，若同时存在明确的广告结构（购物锚点 /
         // 购物文本 / 商品卡片按钮），则广告判定优先，豁免不再放行。
-        const exempt = matchWhitelist(text);
+        // 豁免标签开关关闭时，整段豁免判定直接跳过。
+        const exempt = state.whitelistEnabled ? matchWhitelist(text) : null;
 
         if (exempt) {
-            if (state.exemptNotOverrideAds) {
+            if (state.exemptNotOverrideAds && state.adsEnabled) {
                 if (detectShopAnchor(scope)) {
                     return { type: 'shop', detail: '广告：购物锚点（豁免不覆盖）' };
                 }
@@ -1015,20 +1034,23 @@
             return { type: 'exempt', detail: '豁免：' + exempt };
         }
 
-        // 1) 用户自定义的元素规则
-        const elemRule = detectElementRule(scope);
-        if (elemRule) return { type: 'element', detail: '元素：' + elemRule.label };
-
-        // 2) 官方「广告」角标：作者行内的 30×16 SVG，最准的结构特征
-        if (detectAdBadge(scope)) {
-            return { type: 'shop', detail: '广告：官方广告角标' };
+        // 1) 用户自定义的元素规则（受「元素屏蔽」开关控制）
+        if (state.elementEnabled) {
+            const elemRule = detectElementRule(scope);
+            if (elemRule) return { type: 'element', detail: '元素：' + elemRule.label };
         }
 
-        // 3) 购物锚点：DOM 结构
-        const anchor = detectShopAnchor(scope);
-        if (anchor) return { type: 'shop', detail: '广告：购物锚点' };
+        // 2) 广告判定：官方角标 / 购物锚点（受「广告屏蔽」开关控制）
+        if (state.adsEnabled) {
+            if (detectAdBadge(scope)) {
+                return { type: 'shop', detail: '广告：官方广告角标' };
+            }
+            if (detectShopAnchor(scope)) {
+                return { type: 'shop', detail: '广告：购物锚点' };
+            }
+        }
 
-        // 4) 可见文本综合判定
+        // 3) 可见文本综合判定（内部再按开关区分广告文本与关键词）
         return detectTextRules(text);
     }
 
@@ -1055,7 +1077,7 @@
     /* ---------- 行为日志 ---------- */
     const logBuffer = [];
     const MAX_LOGS = 300;
-    let currentTab = 'tags';
+    let currentTab = 'home';
     let logView = 'diag';
     let keywordFilter = '';
     let whitelistFilter = '';
@@ -1653,11 +1675,67 @@
             border-bottom-color: #3b82f6;
         }
 
+        /* 二级层：功能入口列表 */
+        .ad-entry {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            padding: 9px 11px;
+            border-radius: 9px;
+            background: rgba(255,255,255,.04);
+            border: 1px solid rgba(255,255,255,.06);
+            cursor: pointer;
+            transition: background .15s ease, border-color .15s ease;
+        }
+        .ad-entry:hover { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.11); }
+        .ad-entry.no-nav { cursor: default; }
+        .ad-entry.no-nav:hover { background: rgba(255,255,255,.04); border-color: rgba(255,255,255,.06); }
+        .ad-entry-name { flex: none; font-size: 12px; color: #e2e2e8; }
+        .ad-entry-count {
+            flex: none;
+            min-width: 16px;
+            font-size: 10px;
+            color: #7f7f89;
+            font-family: ui-monospace, Consolas, monospace;
+        }
+        .ad-entry-desc { flex: 1; font-size: 10px; color: #6f6f78; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .ad-entry-arrow { flex: none; color: #6f6f78; font-size: 15px; line-height: 1; }
+
+        /* 三级层：子页返回头 */
+        .ad-sub-head {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding-bottom: 7px;
+            border-bottom: 1px solid rgba(255,255,255,.06);
+            flex: none;
+        }
+        .ad-back {
+            background: none;
+            border: 0;
+            color: #93c5fd;
+            font-size: 17px;
+            cursor: pointer;
+            padding: 0 5px;
+            line-height: 1;
+            border-radius: 5px;
+        }
+        .ad-back:hover { background: rgba(96,165,250,.16); }
+        .ad-sub-head b { font-size: 12px; color: #d8d8de; font-weight: 600; }
+
         .ad-page { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 10px; flex: 1; overflow-y: auto; min-height: 0; }
         .ad-page[data-page="tags"],
         .ad-page[data-page="whitelist"],
         .ad-page[data-page="elements"],
         .ad-page[data-page="logs"] { overflow: hidden; }
+
+        /* 对应开关关闭时，页面内容调暗，提示暂时不参与判定 */
+        .ad-page.off .ad-input-row,
+        .ad-page.off .ad-search,
+        .ad-page.off .ad-tags-head,
+        .ad-page.off .ad-tags,
+        .ad-page.off .ad-elements,
+        .ad-page.off .ad-tip { opacity: .45; }
 
         .ad-resize-handle {
             position: absolute;
@@ -2333,15 +2411,47 @@
                     <button class="ad-diag" type="button" title="复制当前页面诊断信息">诊断</button>
                 </div>
 
-                <div class="ad-tabs">
-                    <button class="ad-tab active" type="button" data-tab="tags">屏蔽标签</button>
-                    <button class="ad-tab" type="button" data-tab="whitelist">豁免标签</button>
-                    <button class="ad-tab" type="button" data-tab="elements">元素屏蔽</button>
-                    <button class="ad-tab" type="button" data-tab="logs">日志</button>
-                    <button class="ad-tab" type="button" data-tab="settings">设置</button>
+                <div class="ad-page" data-page="home">
+                    <div class="ad-entry" data-target="tags">
+                        <span class="ad-entry-name">屏蔽标签</span>
+                        <span class="ad-entry-count" data-count="kw">0</span>
+                        <button class="ad-mini-switch ad-kw-on" type="button" role="switch"><i></i></button>
+                        <span class="ad-entry-arrow">›</span>
+                    </div>
+                    <div class="ad-entry" data-target="whitelist">
+                        <span class="ad-entry-name">豁免标签</span>
+                        <span class="ad-entry-count" data-count="wl">0</span>
+                        <button class="ad-mini-switch ad-wl-on" type="button" role="switch"><i></i></button>
+                        <span class="ad-entry-arrow">›</span>
+                    </div>
+                    <div class="ad-entry" data-target="elements">
+                        <span class="ad-entry-name">屏蔽元素</span>
+                        <span class="ad-entry-count" data-count="elem">0</span>
+                        <button class="ad-mini-switch ad-elem-on" type="button" role="switch"><i></i></button>
+                        <span class="ad-entry-arrow">›</span>
+                    </div>
+                    <div class="ad-entry no-nav">
+                        <span class="ad-entry-name">广告屏蔽</span>
+                        <span class="ad-entry-desc">官方角标 / 购物锚点 / 商品卡</span>
+                        <button class="ad-mini-switch ad-ads-on" type="button" role="switch"><i></i></button>
+                    </div>
+                    <div class="ad-entry" data-target="logs">
+                        <span class="ad-entry-name">日志</span>
+                        <span class="ad-entry-desc">跳过记录与诊断</span>
+                        <span class="ad-entry-arrow">›</span>
+                    </div>
+                    <div class="ad-entry" data-target="settings">
+                        <span class="ad-entry-name">设置</span>
+                        <span class="ad-entry-desc">节奏参数 / 外观 / 导入导出</span>
+                        <span class="ad-entry-arrow">›</span>
+                    </div>
                 </div>
 
-                <div class="ad-page" data-page="tags">
+                <div class="ad-page ad-sub" data-page="tags" hidden>
+                    <div class="ad-sub-head">
+                        <button class="ad-back" type="button" title="返回">‹</button>
+                        <b>屏蔽标签</b>
+                    </div>
                     <div class="ad-input-row">
                         <input class="ad-input" type="text" maxlength="40" placeholder="输入关键词，回车添加">
                         <button class="ad-add" type="button">添加</button>
@@ -2352,7 +2462,11 @@
                     <div class="ad-tip">当前视频的标题、作者或画面文案中出现任一关键词时，自动跳过。</div>
                 </div>
 
-                <div class="ad-page" data-page="whitelist" hidden>
+                <div class="ad-page ad-sub" data-page="whitelist" hidden>
+                    <div class="ad-sub-head">
+                        <button class="ad-back" type="button" title="返回">‹</button>
+                        <b>豁免标签</b>
+                    </div>
                     <div class="ad-input-row">
                         <input class="ad-input ad-wl-input" type="text" maxlength="40" placeholder="豁免关键词，回车添加">
                         <button class="ad-add ad-wl-add" type="button">添加</button>
@@ -2363,13 +2477,21 @@
                     <div class="ad-tip">命中任一豁免词时，这条视频不做任何跳过（优先级高于屏蔽词与元素规则）。</div>
                 </div>
 
-                <div class="ad-page" data-page="elements" hidden>
+                <div class="ad-page ad-sub" data-page="elements" hidden>
+                    <div class="ad-sub-head">
+                        <button class="ad-back" type="button" title="返回">‹</button>
+                        <b>屏蔽元素</b>
+                    </div>
                     <div class="ad-tip">在页面上右键任意元素：选「屏蔽此标签文字」加入屏蔽标签，选「豁免此标签文字」加入豁免，选「屏蔽此元素」记成元素规则。</div>
                     <div class="ad-tags-head">已记录 <b class="ad-elem-count">0</b> 条规则（上限 100 万）</div>
                     <div class="ad-elements"></div>
                 </div>
 
-                <div class="ad-page" data-page="logs" hidden>
+                <div class="ad-page ad-sub" data-page="logs" hidden>
+                    <div class="ad-sub-head">
+                        <button class="ad-back" type="button" title="返回">‹</button>
+                        <b>日志</b>
+                    </div>
                     <div class="ad-log-tabs">
                         <button class="ad-log-tab active" data-logview="diag" type="button">诊断日志</button>
                         <button class="ad-log-tab" data-logview="readable" type="button">可读日志</button>
@@ -2381,7 +2503,11 @@
                     <div class="ad-logs"></div>
                 </div>
 
-                <div class="ad-page" data-page="settings" hidden>
+                <div class="ad-page ad-sub" data-page="settings" hidden>
+                    <div class="ad-sub-head">
+                        <button class="ad-back" type="button" title="返回">‹</button>
+                        <b>设置</b>
+                    </div>
                     <div class="ad-set-row">
                         <span>浮窗大小</span>
                         <input class="ad-num ad-size-num" type="number"
@@ -2495,13 +2621,17 @@
 
         panelWrap.querySelector('.ad-close').addEventListener('click', closePanel);
 
-        // Tab 切换
-        const tabs = panelWrap.querySelectorAll('.ad-tab');
-        const pages = panelWrap.querySelectorAll('.ad-page');
-        tabs.forEach(tab => {
-            tab.addEventListener('click', () => {
-                switchTab(tab.getAttribute('data-tab'));
+        // 二级层：功能入口 → 进入三级层
+        panelWrap.querySelectorAll('.ad-entry[data-target]').forEach(entry => {
+            entry.addEventListener('click', (e) => {
+                if (e.target.closest('.ad-mini-switch')) return;   // 点开关不进入子页
+                switchTab(entry.getAttribute('data-target'));
             });
+        });
+
+        // 三级层：返回二级层
+        panelWrap.querySelectorAll('.ad-back').forEach(btn => {
+            btn.addEventListener('click', () => switchTab('home'));
         });
 
         // 关键词
@@ -2657,6 +2787,10 @@
             store.del(KEYS.panelH);
             store.del(KEYS.maxPerMinute);
             store.del(KEYS.exemptNotOverrideAds);
+            store.del(KEYS.keywordEnabled);
+            store.del(KEYS.whitelistEnabled);
+            store.del(KEYS.elementEnabled);
+            store.del(KEYS.adsEnabled);
             state.pos = null;
             state.size = DEFAULTS.size;
             state.opacity = DEFAULTS.opacity;
@@ -2668,6 +2802,11 @@
             state.panelH = 0;
             state.maxPerMinute = 40;
             state.exemptNotOverrideAds = false;
+            state.keywordEnabled = true;
+            state.whitelistEnabled = true;
+            state.elementEnabled = true;
+            state.adsEnabled = true;
+            syncToggleUI();
             applyPanelSize();
             applySize(state.size);
             applyOpacity(state.opacity);
@@ -2815,6 +2954,51 @@
             });
         }
 
+        // 三个独立开关：屏蔽标签 / 豁免标签 / 元素屏蔽
+        const kwOnBtn = panelWrap.querySelector('.ad-kw-on');
+        if (kwOnBtn) {
+            kwOnBtn.addEventListener('click', () => {
+                state.keywordEnabled = !state.keywordEnabled;
+                store.set(KEYS.keywordEnabled, state.keywordEnabled);
+                syncToggleUI();
+                toast(state.keywordEnabled ? '屏蔽标签已开启' : '屏蔽标签已关闭');
+                check();
+            });
+        }
+
+        const wlOnBtn = panelWrap.querySelector('.ad-wl-on');
+        if (wlOnBtn) {
+            wlOnBtn.addEventListener('click', () => {
+                state.whitelistEnabled = !state.whitelistEnabled;
+                store.set(KEYS.whitelistEnabled, state.whitelistEnabled);
+                syncToggleUI();
+                toast(state.whitelistEnabled ? '豁免标签已开启' : '豁免标签已关闭');
+                check();
+            });
+        }
+
+        const elemOnBtn = panelWrap.querySelector('.ad-elem-on');
+        if (elemOnBtn) {
+            elemOnBtn.addEventListener('click', () => {
+                state.elementEnabled = !state.elementEnabled;
+                store.set(KEYS.elementEnabled, state.elementEnabled);
+                syncToggleUI();
+                toast(state.elementEnabled ? '元素屏蔽已开启' : '元素屏蔽已关闭');
+                check();
+            });
+        }
+
+        const adsOnBtn = panelWrap.querySelector('.ad-ads-on');
+        if (adsOnBtn) {
+            adsOnBtn.addEventListener('click', () => {
+                state.adsEnabled = !state.adsEnabled;
+                store.set(KEYS.adsEnabled, state.adsEnabled);
+                syncToggleUI();
+                toast(state.adsEnabled ? '广告屏蔽已开启' : '广告屏蔽已关闭');
+                check();
+            });
+        }
+
         // 跳过提示开关
         const skipToastBtn = panelWrap.querySelector('.ad-skiptoast');
         if (skipToastBtn) {
@@ -2945,6 +3129,10 @@
         const bar = panelWrap && panelWrap.querySelector('.ad-ignorebar');
         const skiptoast = panelWrap && panelWrap.querySelector('.ad-skiptoast');
         const exemptAds = panelWrap && panelWrap.querySelector('.ad-exemptads');
+        const kwOn = panelWrap && panelWrap.querySelector('.ad-kw-on');
+        const wlOn = panelWrap && panelWrap.querySelector('.ad-wl-on');
+        const elemOn = panelWrap && panelWrap.querySelector('.ad-elem-on');
+        const adsOn = panelWrap && panelWrap.querySelector('.ad-ads-on');
         if (flip) flip.classList.toggle('on', !!state.flipDirection);
         if (giveup) giveup.classList.toggle('on', !!state.giveUpOnFail);
         if (pick) pick.classList.toggle('on', !!state.pickEnabled);
@@ -2952,6 +3140,38 @@
         if (bar) bar.classList.toggle('on', !!state.ignoreRightBar);
         if (skiptoast) skiptoast.classList.toggle('on', !!state.showSkipToast);
         if (exemptAds) exemptAds.classList.toggle('on', !!state.exemptNotOverrideAds);
+        if (kwOn) kwOn.classList.toggle('on', !!state.keywordEnabled);
+        if (wlOn) wlOn.classList.toggle('on', !!state.whitelistEnabled);
+        if (elemOn) elemOn.classList.toggle('on', !!state.elementEnabled);
+        if (adsOn) adsOn.classList.toggle('on', !!state.adsEnabled);
+
+        syncPageDim();
+        updateEntryCounts();
+    }
+
+    // 刷新二级层入口上的数量
+    function updateEntryCounts() {
+        if (!panelWrap) return;
+        const set = (key, val) => {
+            const el = panelWrap.querySelector('.ad-entry-count[data-count="' + key + '"]');
+            if (el) el.textContent = val;
+        };
+        set('kw', state.keywords.length);
+        set('wl', state.whitelist.length);
+        set('elem', state.elementRules.length);
+    }
+
+    // 开关关闭时把对应页面调暗，提示当前不参与判定
+    function syncPageDim() {
+        if (!panelWrap) return;
+        [
+            ['tags', state.keywordEnabled],
+            ['whitelist', state.whitelistEnabled],
+            ['elements', state.elementEnabled]
+        ].forEach(([name, on]) => {
+            const el = panelWrap.querySelector('.ad-page[data-page="' + name + '"]');
+            if (el) el.classList.toggle('off', !on);
+        });
     }
 
     // 元素规则的合并匹配器：selector 合成一条，文本走 Map
@@ -3015,6 +3235,8 @@
             row.appendChild(del);
             box.appendChild(row);
         });
+
+        updateEntryCounts();
     }
 
     // ---------- 右键选取元素 ----------
@@ -3224,7 +3446,11 @@
                     ignoreRightBar: !!state.ignoreRightBar,
                     nextArrowDir: state.nextArrowDir,
                     showSkipToast: !!state.showSkipToast,
-                    exemptNotOverrideAds: !!state.exemptNotOverrideAds
+                    exemptNotOverrideAds: !!state.exemptNotOverrideAds,
+                    keywordEnabled: !!state.keywordEnabled,
+                    whitelistEnabled: !!state.whitelistEnabled,
+                    elementEnabled: !!state.elementEnabled,
+                    adsEnabled: !!state.adsEnabled
                 }
             }
         };
@@ -3305,6 +3531,10 @@
         if (typeof o.ignoreRightBar === 'boolean') { state.ignoreRightBar = o.ignoreRightBar; store.set(KEYS.ignoreRightBar, state.ignoreRightBar); }
         if (typeof o.showSkipToast === 'boolean') { state.showSkipToast = o.showSkipToast; store.set(KEYS.showSkipToast, state.showSkipToast); }
         if (typeof o.exemptNotOverrideAds === 'boolean') { state.exemptNotOverrideAds = o.exemptNotOverrideAds; store.set(KEYS.exemptNotOverrideAds, state.exemptNotOverrideAds); }
+        if (typeof o.keywordEnabled === 'boolean') { state.keywordEnabled = o.keywordEnabled; store.set(KEYS.keywordEnabled, state.keywordEnabled); }
+        if (typeof o.whitelistEnabled === 'boolean') { state.whitelistEnabled = o.whitelistEnabled; store.set(KEYS.whitelistEnabled, state.whitelistEnabled); }
+        if (typeof o.elementEnabled === 'boolean') { state.elementEnabled = o.elementEnabled; store.set(KEYS.elementEnabled, state.elementEnabled); }
+        if (typeof o.adsEnabled === 'boolean') { state.adsEnabled = o.adsEnabled; store.set(KEYS.adsEnabled, state.adsEnabled); }
         if (o.nextArrowDir === 1 || o.nextArrowDir === -1 || o.nextArrowDir === 0) {
             state.nextArrowDir = o.nextArrowDir;
             store.set(KEYS.nextArrowDir, state.nextArrowDir);
@@ -3450,6 +3680,7 @@
         });
 
         box.scrollTop = 0;
+        updateEntryCounts();
     }
 
     // 关键词已存在时：清掉搜索过滤、滚动到该标签并高亮
@@ -3552,6 +3783,7 @@
 
         // 新词在最前面，滚回顶部保证可见
         box.scrollTop = 0;
+        updateEntryCounts();
     }
 
     function updateStat() {
@@ -3663,7 +3895,11 @@
                 giveUpOnFail: !!state.giveUpOnFail,
                 nextArrowDir: state.nextArrowDir,
                 pickEnabled: !!state.pickEnabled,
-                scanFullPage: !!state.scanFullPage
+                scanFullPage: !!state.scanFullPage,
+                keywordEnabled: !!state.keywordEnabled,
+                whitelistEnabled: !!state.whitelistEnabled,
+                elementEnabled: !!state.elementEnabled,
+                adsEnabled: !!state.adsEnabled
             },
             elementRules: state.elementRules.map(r => r.label || r.selector || r.text),
             whitelist: state.whitelist.slice(),
@@ -3832,16 +4068,14 @@
         if (!panelWrap) return;
         currentTab = name;
 
-        const tabs = panelWrap.querySelectorAll('.ad-tab');
         const pages = panelWrap.querySelectorAll('.ad-page');
-
-        tabs.forEach(t => t.classList.toggle('active', t.getAttribute('data-tab') === name));
         pages.forEach(p => {
             if (p.getAttribute('data-page') === name) p.removeAttribute('hidden');
             else p.setAttribute('hidden', '');
         });
 
         if (name === 'logs') renderLogs();
+        if (name === 'home') updateEntryCounts();
     }
 
     function openPanel() {
