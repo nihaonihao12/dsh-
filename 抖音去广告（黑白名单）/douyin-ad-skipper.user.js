@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.13.0
+// @version      7.14.0
 // @description  识别广告角标/购物锚点/广告文字/自定义关键词，自动跳过广告视频；二级层为功能入口，内置判定逐项可开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.13.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.14.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -288,6 +288,7 @@
         showSkipToast: 'adskip.v2.showSkipToast',
         muteOnSkip: 'adskip.v2.muteOnSkip',
         muteDuration: 'adskip.v2.muteDuration',
+        tagHits: 'adskip.v2.tagHits',
         exemptNotOverrideAds: 'adskip.v2.exemptNotOverrideAds',
         exemptBloggerAds: 'adskip.v2.exemptBloggerAds',
         autoHideEnabled: 'adskip.v2.autoHideEnabled',
@@ -433,6 +434,59 @@
     state.keywords = normalizeKeywords(store.get(KEYS.keywords, []), state.keywordLimit);
     state.whitelist = normalizeKeywords(store.get(KEYS.whitelist, []), state.whitelistLimit);
     state.adTexts = normalizeKeywords(store.get(KEYS.adTexts, []), state.adTextLimit);
+
+    /* ---------- 标签触发统计：{ 标签: { t: 最后触发时间, c: 次数 } } ---------- */
+    let tagHits = {};
+    let tagHitsDirty = false;
+    let tagHitsTimer = null;
+
+    function loadTagHits() {
+        try {
+            const v = store.get(KEYS.tagHits, {});
+            tagHits = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+        } catch (e) {
+            tagHits = {};
+        }
+    }
+
+    function scheduleTagHitsSave() {
+        tagHitsDirty = true;
+        if (tagHitsTimer) return;
+        tagHitsTimer = setTimeout(() => {
+            tagHitsTimer = null;
+            if (!tagHitsDirty) return;
+            tagHitsDirty = false;
+            store.set(KEYS.tagHits, tagHits);
+        }, 2000);
+    }
+
+    function noteTagHit(kw) {
+        if (!kw) return;
+        const cur = tagHits[kw] || { t: 0, c: 0 };
+        cur.t = Date.now();
+        cur.c = (cur.c || 0) + 1;
+        tagHits[kw] = cur;
+        scheduleTagHitsSave();
+    }
+
+    function getTagHits(kw) {
+        const v = tagHits[kw];
+        if (!v) return { t: 0, c: 0 };
+        return { t: v.t || 0, c: v.c || 0 };
+    }
+
+    // 启动时清掉已删除标签的统计，避免无限膨胀
+    function pruneTagHits() {
+        const alive = new Set(state.keywords.concat(state.whitelist, state.adTexts));
+        let changed = false;
+        Object.keys(tagHits).forEach(k => {
+            if (!alive.has(k)) {
+                delete tagHits[k];
+                changed = true;
+            }
+        });
+        if (changed) scheduleTagHitsSave();
+    }
 
     /* ---------- 关键词联合匹配器：一次扫描命中所有词 ---------- */
     let keywordRegex = null;
@@ -1164,7 +1218,10 @@
 
         if (state.keywordEnabled) {
             const kw = matchKeyword(text);
-            if (kw) return { type: 'keyword', detail: '标签：' + kw };
+            if (kw) {
+                noteTagHit(kw);
+                return { type: 'keyword', detail: '标签：' + kw };
+            }
         }
 
         return null;
@@ -1217,12 +1274,14 @@
 
         // 广告文字：优先级等同于内置广告判定
         const adTextHit = state.adTextEnabled ? matchAdText(text) : null;
+        if (adTextHit) noteTagHit(adTextHit);
 
         // 豁免关键词优先级最高：命中就不再跳过。
         // 但开启「豁免不覆盖广告」后，内置广告判定与广告文字优先，豁免不再放行。
         // 「豁免博主广告」开启时，只有 @ 开头的豁免词不覆盖广告，普通豁免词照常生效。
         // 豁免标签开关关闭时，整段豁免判定直接跳过。
         const exempt = state.whitelistEnabled ? matchWhitelist(text) : null;
+        if (exempt) noteTagHit(exempt);
 
         if (exempt) {
             const bloggerExempt = state.exemptBloggerAds && exempt.charAt(0) === '@';
@@ -2296,12 +2355,24 @@
         }
         .ad-batch-bar {
             display: flex;
-            align-items: center;
+            flex-direction: column;
             gap: 6px;
             font-size: 10px;
             color: #9a9aa4;
         }
-        .ad-batch-bar .ad-batch-count { flex: 1; }
+        .ad-filter-row {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            flex-wrap: wrap;
+        }
+        .ad-filter-row .ad-num { width: 46px; }
+        .ad-batch-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .ad-batch-actions .ad-batch-count { flex: 1; }
         .ad-batch-bar button {
             padding: 4px 9px;
             border-radius: 6px;
@@ -2323,6 +2394,17 @@
             color: #fff;
         }
         .ad-tag.selected i { color: #fff; }
+
+        .ad-tag-hit {
+            font-style: normal;
+            font-size: 9px;
+            font-weight: 600;
+            line-height: 1;
+            padding: 1px 4px;
+            border-radius: 4px;
+            background: rgba(255,255,255,.08);
+            margin-left: 1px;
+        }
 
         .ad-tags {
             display: flex;
@@ -3062,9 +3144,18 @@
                         <button class="ad-batch-btn" type="button" data-list="tags">批量</button>
                     </div>
                     <div class="ad-batch-bar" data-list="tags" hidden>
-                        <span class="ad-batch-count">已选 0</span>
-                        <button class="ad-batch-all" type="button">全选</button>
-                        <button class="ad-batch-del" type="button">删除选中</button>
+                        <div class="ad-filter-row">
+                            <input class="ad-num ad-filter-count" type="number" min="0" placeholder="次数">
+                            <span>次以下</span>
+                            <input class="ad-num ad-filter-days" type="number" min="0" placeholder="天数">
+                            <span>天未触发</span>
+                        </div>
+                        <div class="ad-batch-actions">
+                            <span class="ad-batch-count">已选 0</span>
+                            <button class="ad-batch-invert" type="button">反选</button>
+                            <button class="ad-batch-all" type="button">全选</button>
+                            <button class="ad-batch-del" type="button">删除选中</button>
+                        </div>
                     </div>
                     <div class="ad-tags-head">已添加 <b class="ad-tag-count">0 / 60</b>（新词在最前）</div>
                     <div class="ad-tags"></div>
@@ -3081,9 +3172,18 @@
                         <button class="ad-batch-btn" type="button" data-list="whitelist">批量</button>
                     </div>
                     <div class="ad-batch-bar" data-list="whitelist" hidden>
-                        <span class="ad-batch-count">已选 0</span>
-                        <button class="ad-batch-all" type="button">全选</button>
-                        <button class="ad-batch-del" type="button">删除选中</button>
+                        <div class="ad-filter-row">
+                            <input class="ad-num ad-filter-count" type="number" min="0" placeholder="次数">
+                            <span>次以下</span>
+                            <input class="ad-num ad-filter-days" type="number" min="0" placeholder="天数">
+                            <span>天未触发</span>
+                        </div>
+                        <div class="ad-batch-actions">
+                            <span class="ad-batch-count">已选 0</span>
+                            <button class="ad-batch-invert" type="button">反选</button>
+                            <button class="ad-batch-all" type="button">全选</button>
+                            <button class="ad-batch-del" type="button">删除选中</button>
+                        </div>
                     </div>
                     <div class="ad-tags-head">已豁免 <b class="ad-wl-count">0 / 60</b></div>
                     <div class="ad-tags ad-wl-tags"></div>
@@ -3138,9 +3238,18 @@
                         <button class="ad-batch-btn" type="button" data-list="adtext">批量</button>
                     </div>
                     <div class="ad-batch-bar" data-list="adtext" hidden>
-                        <span class="ad-batch-count">已选 0</span>
-                        <button class="ad-batch-all" type="button">全选</button>
-                        <button class="ad-batch-del" type="button">删除选中</button>
+                        <div class="ad-filter-row">
+                            <input class="ad-num ad-filter-count" type="number" min="0" placeholder="次数">
+                            <span>次以下</span>
+                            <input class="ad-num ad-filter-days" type="number" min="0" placeholder="天数">
+                            <span>天未触发</span>
+                        </div>
+                        <div class="ad-batch-actions">
+                            <span class="ad-batch-count">已选 0</span>
+                            <button class="ad-batch-invert" type="button">反选</button>
+                            <button class="ad-batch-all" type="button">全选</button>
+                            <button class="ad-batch-del" type="button">删除选中</button>
+                        </div>
                     </div>
                     <div class="ad-tags-head">已添加 <b class="ad-text-count">0 / 60</b>（新词在最前）</div>
                     <div class="ad-tags ad-adtext-tags"></div>
@@ -3816,6 +3925,34 @@
             btn.addEventListener('click', () => {
                 const key = btn.parentElement.getAttribute('data-list');
                 deleteSelected(key);
+            });
+        });
+
+        // 筛选：N 天未触发 / 次数 N 以下
+        panelWrap.querySelectorAll('.ad-batch-bar').forEach(bar => {
+            const key = bar.getAttribute('data-list');
+            const dayInput = bar.querySelector('.ad-filter-days');
+            const countInput = bar.querySelector('.ad-filter-count');
+
+            const apply = () => {
+                const f = listFilters[key];
+                f.days = dayInput ? Math.max(0, parseInt(dayInput.value, 10) || 0) : 0;
+                f.count = (countInput && countInput.value !== '')
+                    ? Math.max(0, parseInt(countInput.value, 10) || 0)
+                    : -1;
+                syncBatchUI(key);
+                rerenderList(key, true);
+            };
+
+            if (dayInput) dayInput.addEventListener('change', apply);
+            if (countInput) countInput.addEventListener('change', apply);
+        });
+
+        // 反选（日期与次数筛选共用）
+        panelWrap.querySelectorAll('.ad-batch-invert').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const bar = btn.closest('.ad-batch-bar');
+                if (bar) invertSelection(bar.getAttribute('data-list'));
             });
         });
 
@@ -4623,10 +4760,11 @@
 
         const countEl = panelWrap.querySelector('.ad-wl-count');
         const q = whitelistFilter.trim().toLowerCase();
-        const list = q ? state.whitelist.filter(k => k.toLowerCase().includes(q)) : state.whitelist;
+        const list = getVisibleList('whitelist');
 
+        const hasFilter = q || listFilters.whitelist.days > 0 || listFilters.whitelist.count >= 0;
         if (countEl) {
-            countEl.textContent = q
+            countEl.textContent = hasFilter
                 ? '匹配 ' + list.length + ' / ' + state.whitelist.length
                 : state.whitelist.length + ' / ' + state.whitelistLimit;
         }
@@ -4728,10 +4866,11 @@
 
         const countEl = panelWrap.querySelector('.ad-text-count');
         const q = adTextFilter.trim().toLowerCase();
-        const list = q ? state.adTexts.filter(k => k.toLowerCase().includes(q)) : state.adTexts;
+        const list = getVisibleList('adtext');
 
+        const hasFilter = q || listFilters.adtext.days > 0 || listFilters.adtext.count >= 0;
         if (countEl) {
-            countEl.textContent = q
+            countEl.textContent = hasFilter
                 ? '匹配 ' + list.length + ' / ' + state.adTexts.length
                 : state.adTexts.length + ' / ' + state.adTextLimit;
         }
@@ -4793,18 +4932,59 @@
         adtext: { active: false, selected: new Set() }
     };
 
-    // 当前列表在搜索过滤后实际显示的内容
+    // 当前列表在搜索 + 筛选后实际显示的内容
+    const listFilters = {
+        tags: { days: 0, count: -1 },
+        whitelist: { days: 0, count: -1 },
+        adtext: { days: 0, count: -1 }
+    };
+
     function getVisibleList(key) {
+        let list;
+
         if (key === 'tags') {
             const q = keywordFilter.trim().toLowerCase();
-            return q ? state.keywords.filter(k => k.toLowerCase().includes(q)) : state.keywords;
-        }
-        if (key === 'whitelist') {
+            list = q ? state.keywords.filter(k => k.toLowerCase().includes(q)) : state.keywords.slice();
+        } else if (key === 'whitelist') {
             const q = whitelistFilter.trim().toLowerCase();
-            return q ? state.whitelist.filter(k => k.toLowerCase().includes(q)) : state.whitelist;
+            list = q ? state.whitelist.filter(k => k.toLowerCase().includes(q)) : state.whitelist.slice();
+        } else {
+            const q = adTextFilter.trim().toLowerCase();
+            list = q ? state.adTexts.filter(k => k.toLowerCase().includes(q)) : state.adTexts.slice();
         }
-        const q = adTextFilter.trim().toLowerCase();
-        return q ? state.adTexts.filter(k => k.toLowerCase().includes(q)) : state.adTexts;
+
+        const f = listFilters[key];
+
+        // 「N 天未触发」筛选：从未触发过的也算
+        if (f.days > 0) {
+            const cutoff = Date.now() - f.days * 86400000;
+            list = list.filter(k => {
+                const h = getTagHits(k);
+                return !h.t || h.t <= cutoff;
+            });
+        }
+
+        // 「触发次数 N 以下」筛选
+        if (f.count >= 0) {
+            list = list.filter(k => getTagHits(k).c <= f.count);
+        }
+
+        return list;
+    }
+
+    // 反选：对当前可见列表里已选的取消、未选的选中
+    function invertSelection(key) {
+        const st = batchState[key];
+        if (!st.active) return;
+
+        const list = getVisibleList(key);
+        list.forEach(k => {
+            if (st.selected.has(k)) st.selected.delete(k);
+            else st.selected.add(k);
+        });
+
+        syncBatchUI(key);
+        rerenderList(key, true);
     }
 
     function getListBox(key) {
@@ -4937,7 +5117,11 @@
             const inner = document.createElement('div');
             inner.className = 'ad-tags-inner';
 
-            arr.forEach(kw => inner.appendChild(makeTag(kw)));
+            arr.forEach(kw => {
+                const tag = makeTag(kw);
+                decorateTag(tag, kw);
+                inner.appendChild(tag);
+            });
 
             group.appendChild(label);
             group.appendChild(inner);
@@ -4948,6 +5132,51 @@
         addGroup(otherTitle || '关键词', others);
     }
 
+    // 给标签加触发次数徽章 + 长期未触发的变灰效果
+    function decorateTag(tag, kw) {
+        const hits = getTagHits(kw);
+
+        if (hits.t) {
+            const days = (Date.now() - hits.t) / 86400000;
+            if (days >= 3) tag.style.opacity = String(staleOpacity(days));
+        }
+
+        if (hits.c > 0) {
+            const badge = document.createElement('em');
+            badge.className = 'ad-tag-hit';
+            badge.textContent = hits.c;
+            badge.title = '触发 ' + hits.c + ' 次' + (hits.t ? '，最后 ' + formatAgo(hits.t) : '');
+            badge.style.color = hitColor(hits.c);
+
+            const del = tag.querySelector('i');
+            if (del) tag.insertBefore(badge, del);
+            else tag.appendChild(badge);
+        }
+    }
+
+    function staleOpacity(days) {
+        if (days >= 30) return 0.4;
+        if (days >= 14) return 0.55;
+        if (days >= 7) return 0.7;
+        if (days >= 3) return 0.85;
+        return 1;
+    }
+
+    function hitColor(c) {
+        if (c >= 20) return '#ff3b3b';
+        if (c >= 10) return '#ff6b6b';
+        if (c >= 5) return '#ff9090';
+        if (c >= 2) return '#ffb3b3';
+        return '#ffd0d0';
+    }
+
+    function formatAgo(t) {
+        const days = Math.floor((Date.now() - t) / 86400000);
+        if (days <= 0) return '今天';
+        if (days === 1) return '昨天';
+        return days + ' 天前';
+    }
+
     function renderTags() {
         rebuildKeywordMatcher();
 
@@ -4956,10 +5185,11 @@
 
         const countEl = panelWrap.querySelector('.ad-tag-count');
         const q = keywordFilter.trim().toLowerCase();
-        const list = q ? state.keywords.filter(k => k.toLowerCase().includes(q)) : state.keywords;
+        const list = getVisibleList('tags');
 
+        const hasFilter = q || listFilters.tags.days > 0 || listFilters.tags.count >= 0;
         if (countEl) {
-            countEl.textContent = q
+            countEl.textContent = hasFilter
                 ? '匹配 ' + list.length + ' / ' + state.keywords.length
                 : state.keywords.length + ' / ' + state.keywordLimit;
         }
@@ -5623,6 +5853,9 @@
      * 9. 启动
      * ============================================================ */
     function init() {
+        loadTagHits();
+        pruneTagHits();
+
         injectStyle();
         buildFab();
         buildPanel();
