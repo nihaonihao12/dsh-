@@ -1,7 +1,7 @@
-// ==UserScript==
+﻿// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.3.0
+// @version      7.4.0
 // @description  识别广告角标/购物锚点/广告文字/自定义关键词，自动跳过广告视频；二级层为功能入口，内置判定逐项可开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.3.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.4.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -799,9 +799,11 @@
         if (!el || el.nodeType !== 1) return;
 
         const isExempt = mode === 'exempt';
-        const list = isExempt ? state.whitelist : state.keywords;
-        const cap = isExempt ? state.whitelistLimit : state.keywordLimit;
-        const label = isExempt ? '豁免' : '屏蔽';
+        const isAdText = mode === 'adtext';
+
+        const list = isExempt ? state.whitelist : (isAdText ? state.adTexts : state.keywords);
+        const cap = isExempt ? state.whitelistLimit : (isAdText ? state.adTextLimit : state.keywordLimit);
+        const label = isExempt ? '豁免' : (isAdText ? '广告文字' : '屏蔽');
 
         let text = normText(el.textContent);
 
@@ -843,16 +845,27 @@
             state.whitelist = next;
             store.set(KEYS.whitelist, state.whitelist);
             renderWhitelist();
+        } else if (isAdText) {
+            state.adTexts = next;
+            store.set(KEYS.adTexts, state.adTexts);
+            renderAdTexts();
         } else {
             state.keywords = next;
             store.set(KEYS.keywords, state.keywords);
             renderTags();
         }
 
-        const offHint = isExempt
-            ? (state.whitelistEnabled ? '' : '（豁免开关已关闭，暂时不生效）')
-            : (state.keywordEnabled ? '' : '（屏蔽开关已关闭，暂时不生效）');
-        toast('已' + label + '标签：' + text + offHint);
+        let offHint = '';
+        if (isExempt) {
+            offHint = state.whitelistEnabled ? '' : '（豁免开关已关闭，暂时不生效）';
+        } else if (isAdText) {
+            offHint = (state.adsEnabled && state.adTextEnabled) ? '' : '（广告文字已关闭，暂时不生效）';
+        } else {
+            offHint = state.keywordEnabled ? '' : '（屏蔽开关已关闭，暂时不生效）';
+        }
+
+        const doneMsg = isExempt ? '已豁免标签：' : (isAdText ? '已添加广告文字：' : '已屏蔽标签：');
+        toast(doneMsg + text + offHint);
         check();
     }
 
@@ -2591,6 +2604,11 @@
                         <button class="ad-mini-switch ad-ads-on" type="button" role="switch"><i></i></button>
                         <span class="ad-entry-arrow">›</span>
                     </div>
+                    <div class="ad-entry no-nav">
+                        <span class="ad-entry-name">右键菜单</span>
+                        <span class="ad-entry-desc">右键元素时弹出屏蔽菜单</span>
+                        <button class="ad-mini-switch ad-pick" type="button" role="switch"><i></i></button>
+                    </div>
                     <div class="ad-entry" data-target="logs">
                         <span class="ad-entry-name">日志</span>
                         <span class="ad-entry-desc">跳过记录与诊断</span>
@@ -2723,10 +2741,6 @@
                     <div class="ad-toggle-row">
                         <span class="ad-toggle-label">失败后放弃<span>关掉则一直重试</span></span>
                         <button class="ad-mini-switch ad-giveup" type="button" role="switch"><i></i></button>
-                    </div>
-                    <div class="ad-toggle-row">
-                        <span class="ad-toggle-label">右键选取元素<span>关闭后恢复浏览器右键</span></span>
-                        <button class="ad-mini-switch ad-pick" type="button" role="switch"><i></i></button>
                     </div>
                     <div class="ad-toggle-row">
                         <span class="ad-toggle-label">扫描全页面<span>整页扫描会算上相邻预加载卡片</span></span>
@@ -3560,11 +3574,12 @@
             <div class="ad-pick-title">屏蔽 / 豁免</div>
             <div class="ad-pick-item" data-act="keyword">屏蔽此标签文字</div>
             <div class="ad-pick-item" data-act="exempt">豁免此标签文字</div>
+            <div class="ad-pick-item" data-act="adtext">广告标签屏蔽</div>
             <div class="ad-pick-item" data-act="block">屏蔽此元素</div>
             <div class="ad-pick-item" data-act="cancel">取消</div>
         `;
         pickMenuEl.style.left = Math.min(e.clientX, window.innerWidth - 176) + 'px';
-        pickMenuEl.style.top = Math.min(e.clientY, window.innerHeight - 180) + 'px';
+        pickMenuEl.style.top = Math.min(e.clientY, window.innerHeight - 210) + 'px';
         document.body.appendChild(pickMenuEl);
 
         const target = e.target;
@@ -3576,6 +3591,7 @@
                 const act = item.getAttribute('data-act');
                 if (act === 'keyword') addKeywordFromElement(target, 'block');
                 else if (act === 'exempt') addKeywordFromElement(target, 'exempt');
+                else if (act === 'adtext') addKeywordFromElement(target, 'adtext');
                 else if (act === 'block') addElementRule(target);
                 closePickMenu();
             });
