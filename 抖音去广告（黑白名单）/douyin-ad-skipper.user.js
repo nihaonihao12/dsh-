@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.12.0
+// @version      7.13.0
 // @description  识别广告角标/购物锚点/广告文字/自定义关键词，自动跳过广告视频；二级层为功能入口，内置判定逐项可开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.12.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.13.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -1239,7 +1239,7 @@
                 if (state.adsEnabled) {
                     const builtin = detectBuiltinAd(scope, text);
                     if (builtin) return { type: builtin.type, detail: builtin.detail + '（豁免不覆盖）' };
-                    if (adTextHit) return { type: 'shop', detail: '广告文字：' + adTextHit + '（豁免不覆盖）' };
+                    if (adTextHit) return { type: 'adtext', detail: '广告文字：' + adTextHit + '（豁免不覆盖）' };
                 }
             }
             return { type: 'exempt', detail: '豁免：' + exempt };
@@ -1259,7 +1259,7 @@
         if (state.adsEnabled) {
             const builtin = detectBuiltinAd(scope, text);
             if (builtin) return builtin;
-            if (adTextHit) return { type: 'shop', detail: '广告文字：' + adTextHit };
+            if (adTextHit) return { type: 'adtext', detail: '广告文字：' + adTextHit };
         }
 
         // 3) 用户关键词
@@ -1392,8 +1392,17 @@
     function readableTabFor(kind) {
         if (kind === 'keyword') return 'tags';
         if (kind === 'exempt') return 'whitelist';
+        if (kind === 'adtext') return 'ads';
         if (kind === 'element') return 'elements';
         return '';
+    }
+
+    // 从日志的 reason 里取出具体标签名，如「标签：原神」→「原神」
+    function extractTagFromReason(reason) {
+        if (!reason) return '';
+        const idx = reason.indexOf('：');
+        if (idx < 0) return '';
+        return reason.slice(idx + 1).replace(/（[^）]*）\s*$/, '').trim();
     }
 
     function log(msg, level) {
@@ -2520,6 +2529,7 @@
             border-radius: 50%;
         }
         .ad-elem-item i:hover { color: #fff; background: rgba(239,68,68,.5); }
+        .ad-elem-item.flash { animation: adTagFlash 1.4s ease; }
 
         .ad-pick-menu {
             position: fixed;
@@ -4210,6 +4220,46 @@
         }, true);
     }
 
+    // 从可读日志跳到对应页面，并定位到那条记录对应的标签
+    function openLogTarget(tab, record) {
+        if (!panelWrap) return;
+
+        switchTab(tab);
+
+        const kw = extractTagFromReason(record.reason);
+        if (!kw) return;
+
+        // 等子窗口渲染完成后再定位
+        setTimeout(() => {
+            if (!panelWrap) return;
+            if (tab === 'tags') locateTag('ad-tags', kw);
+            else if (tab === 'whitelist') locateTag('ad-wl-tags', kw);
+            else if (tab === 'ads') locateTag('ad-adtext-tags', kw);
+            else if (tab === 'elements') locateElementRule(kw);
+        }, 180);
+    }
+
+    // 定位元素规则并高亮
+    function locateElementRule(kw) {
+        const box = panelWrap && panelWrap.querySelector('.ad-elements');
+        if (!box) return;
+
+        const target = kw.toLowerCase();
+        const items = box.querySelectorAll('.ad-elem-item');
+        for (const item of items) {
+            const label = item.querySelector('.ad-elem-label');
+            if (!label) continue;
+            if (!label.textContent.toLowerCase().includes(target)) continue;
+
+            const top = item.offsetTop - box.offsetTop;
+            box.scrollTop = Math.max(0, top - 20);
+
+            item.classList.add('flash');
+            setTimeout(() => item.classList.remove('flash'), 1400);
+            return;
+        }
+    }
+
     function renderLogs() {
         const box = panelWrap && panelWrap.querySelector('.ad-logs');
         if (!box) return;
@@ -4237,12 +4287,13 @@
                     r.action + '  ' + r.reason + (r.vid ? '  →  ' + r.vid : '')
                 ));
 
-                // 可点击跳到对应的标签 / 元素页
+                // 可点击跳到对应的标签 / 元素页，并定位到具体标签
                 const tab = readableTabFor(r.kind);
                 if (tab) {
+                    const tabName = SUB_TITLES[tab] || tab;
                     line.classList.add('nav');
-                    line.title = '点击查看对应的' + (tab === 'tags' ? '屏蔽标签' : tab === 'whitelist' ? '豁免标签' : '元素规则');
-                    line.addEventListener('click', () => switchTab(tab));
+                    line.title = '点击跳转到「' + tabName + '」并定位该标签';
+                    line.addEventListener('click', () => openLogTarget(tab, r));
                 }
 
                 frag.appendChild(line);
@@ -4632,15 +4683,17 @@
     function locateTag(boxClass, kw) {
         if (!panelWrap) { toast('已存在：' + kw); return; }
 
-        const isKw = boxClass === 'ad-tags';
-
         // 若搜索框有过滤，先清掉，否则标签可能不可见
-        const searchSel = isKw ? '.ad-kw-search' : '.ad-wl-search';
+        let searchSel = '.ad-kw-search';
+        if (boxClass === 'ad-wl-tags') searchSel = '.ad-wl-search';
+        else if (boxClass === 'ad-adtext-tags') searchSel = '.ad-adtext-search';
+
         const searchEl = panelWrap.querySelector(searchSel);
         if (searchEl && searchEl.value) {
             searchEl.value = '';
-            if (isKw) { keywordFilter = ''; renderTags(); }
-            else { whitelistFilter = ''; renderWhitelist(); }
+            if (boxClass === 'ad-tags') { keywordFilter = ''; renderTags(); }
+            else if (boxClass === 'ad-wl-tags') { whitelistFilter = ''; renderWhitelist(); }
+            else { adTextFilter = ''; renderAdTexts(); }
         }
 
         const box = panelWrap.querySelector('.' + boxClass);
