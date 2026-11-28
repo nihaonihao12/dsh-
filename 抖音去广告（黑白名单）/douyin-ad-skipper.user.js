@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.10.0
+// @version      7.11.0
 // @description  识别广告角标/购物锚点/广告文字/自定义关键词，自动跳过广告视频；二级层为功能入口，内置判定逐项可开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.10.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.11.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -286,6 +286,7 @@
         keywordLimit: 'adskip.v2.keywordLimit',
         whitelistLimit: 'adskip.v2.whitelistLimit',
         showSkipToast: 'adskip.v2.showSkipToast',
+        muteOnSkip: 'adskip.v2.muteOnSkip',
         exemptNotOverrideAds: 'adskip.v2.exemptNotOverrideAds',
         exemptBloggerAds: 'adskip.v2.exemptBloggerAds',
         autoHideEnabled: 'adskip.v2.autoHideEnabled',
@@ -371,6 +372,8 @@
         keywordLimit: clampNum(store.get(KEYS.keywordLimit, 60), 1, 1000000, 60),
         whitelistLimit: clampNum(store.get(KEYS.whitelistLimit, 60), 1, 1000000, 60),
         showSkipToast: store.get(KEYS.showSkipToast, true),
+        // 跳过时临时静音，避免广告声音漏出
+        muteOnSkip: store.get(KEYS.muteOnSkip, true),
         exemptNotOverrideAds: store.get(KEYS.exemptNotOverrideAds, false),
         // 博主豁免词（@ 开头）不覆盖广告：只放行普通视频，博主的带货广告仍然跳过
         exemptBloggerAds: store.get(KEYS.exemptBloggerAds, false),
@@ -1336,8 +1339,7 @@
 
     /* ============================================================
      * 4. 跳过动作
-     * ============================================================ */
-    let lastSkippedVid = '';
+     * ============================================================ */    let lastSkippedVid = '';
     let lastExemptVid = '';
     let lastSkippedAt = 0;
     let lastSkipAt = 0;
@@ -1574,6 +1576,43 @@
     const skipAttempts = new Map();   // vid -> 已尝试轮数
     let skipping = false;
 
+    /* ---------- 跳过时临时静音 ---------- */
+    let muteBackup = null;        // { wasMuted: bool }
+    let muteRestoreTimer = null;
+
+    function muteForSkip() {
+        if (muteRestoreTimer) {
+            clearTimeout(muteRestoreTimer);
+            muteRestoreTimer = null;
+        }
+
+        if (!muteBackup) {
+            // 记录静音前是否有声，跳转完成后据此恢复
+            const vids = document.querySelectorAll('video');
+            const anyPlaying = Array.from(vids).some(v => !v.muted);
+            muteBackup = { wasMuted: !anyPlaying };
+        }
+
+        document.querySelectorAll('video').forEach(v => {
+            try { v.muted = true; } catch (e) { /* ignore */ }
+        });
+    }
+
+    function restoreVideoSound(delay) {
+        if (!muteBackup) return;
+        if (muteRestoreTimer) clearTimeout(muteRestoreTimer);
+
+        muteRestoreTimer = setTimeout(() => {
+            muteRestoreTimer = null;
+            const wasMuted = muteBackup ? muteBackup.wasMuted : false;
+            muteBackup = null;
+
+            document.querySelectorAll('video').forEach(v => {
+                try { v.muted = wasMuted; } catch (e) { /* ignore */ }
+            });
+        }, delay || 650);
+    }
+
     // 等待切换完成：同时盯作品号和卡片序号，且每次采样前作废卡片缓存。
     // 缓存 (120ms) 会在滑动画期间一直返回旧卡片，导致误判未生效并补发动作。
     function waitForChange(vid, indexBefore, timeout) {
@@ -1607,6 +1646,8 @@
         skipAttempts.set(vid, tried + 1);
         lastSkipAt = Date.now();
         skipHistory.push(lastSkipAt);
+
+        if (state.muteOnSkip) muteForSkip();
 
         let dir = currentDirection();
         if (state.flipDirection) dir = -dir;   // 手动或自动纠偏后的方向
@@ -1677,6 +1718,7 @@
             }
         } finally {
             skipping = false;
+            if (state.muteOnSkip) restoreVideoSound(650);
         }
 
         invalidateCardCache();
@@ -3145,6 +3187,10 @@
                         <button class="ad-mini-switch ad-skiptoast" type="button" role="switch"><i></i></button>
                     </div>
                     <div class="ad-toggle-row">
+                        <span class="ad-toggle-label">跳过时静音<span>跳转瞬间临时静音，避免广告声音漏出</span></span>
+                        <button class="ad-mini-switch ad-muteskip" type="button" role="switch"><i></i></button>
+                    </div>
+                    <div class="ad-toggle-row">
                         <span class="ad-toggle-label">豁免不覆盖广告<span>命中豁免词时，明确广告仍然跳过</span></span>
                         <button class="ad-mini-switch ad-exemptads" type="button" role="switch"><i></i></button>
                     </div>
@@ -3408,6 +3454,7 @@
             store.del(KEYS.elementEnabled);
             store.del(KEYS.adsEnabled);
             store.del(KEYS.blockLive);
+            store.del(KEYS.muteOnSkip);
             store.del(KEYS.adBadgeEnabled);
             store.del(KEYS.shopAnchorEnabled);
             store.del(KEYS.shopTextEnabled);
@@ -3441,6 +3488,7 @@
             state.elementEnabled = true;
             state.adsEnabled = true;
             state.blockLive = false;
+            state.muteOnSkip = true;
             state.adBadgeEnabled = true;
             state.shopAnchorEnabled = true;
             state.shopTextEnabled = true;
@@ -3757,6 +3805,17 @@
             });
         }
 
+        // 跳过时静音
+        const muteSkipBtn = panelWrap.querySelector('.ad-muteskip');
+        if (muteSkipBtn) {
+            muteSkipBtn.addEventListener('click', () => {
+                state.muteOnSkip = !state.muteOnSkip;
+                store.set(KEYS.muteOnSkip, state.muteOnSkip);
+                syncToggleUI();
+                toast(state.muteOnSkip ? '跳过时静音已开启' : '跳过时静音已关闭');
+            });
+        }
+
         // 豁免不覆盖广告
         const exemptAdsBtn = panelWrap.querySelector('.ad-exemptads');
         if (exemptAdsBtn) {
@@ -3929,6 +3988,7 @@
         const scan = panelWrap && panelWrap.querySelector('.ad-scanfull');
         const bar = panelWrap && panelWrap.querySelector('.ad-ignorebar');
         const skiptoast = panelWrap && panelWrap.querySelector('.ad-skiptoast');
+        const muteSkip = panelWrap && panelWrap.querySelector('.ad-muteskip');
         const exemptAds = panelWrap && panelWrap.querySelector('.ad-exemptads');
         const exemptBlog = panelWrap && panelWrap.querySelector('.ad-exemptblog');
         const autoHide = panelWrap && panelWrap.querySelector('.ad-autohide');
@@ -3949,6 +4009,7 @@
         if (scan) scan.classList.toggle('on', !!state.scanFullPage);
         if (bar) bar.classList.toggle('on', !!state.ignoreRightBar);
         if (skiptoast) skiptoast.classList.toggle('on', !!state.showSkipToast);
+        if (muteSkip) muteSkip.classList.toggle('on', !!state.muteOnSkip);
         if (exemptAds) exemptAds.classList.toggle('on', !!state.exemptNotOverrideAds);
         if (exemptBlog) exemptBlog.classList.toggle('on', !!state.exemptBloggerAds);
         if (autoHide) autoHide.classList.toggle('on', !!state.autoHideEnabled);
@@ -4271,6 +4332,7 @@
                     ignoreRightBar: !!state.ignoreRightBar,
                     nextArrowDir: state.nextArrowDir,
                     showSkipToast: !!state.showSkipToast,
+                    muteOnSkip: !!state.muteOnSkip,
                     exemptNotOverrideAds: !!state.exemptNotOverrideAds,
                     exemptBloggerAds: !!state.exemptBloggerAds,
                     autoHideEnabled: !!state.autoHideEnabled,
@@ -4373,6 +4435,7 @@
         if (typeof o.scanFullPage === 'boolean') { state.scanFullPage = o.scanFullPage; store.set(KEYS.scanFullPage, state.scanFullPage); }
         if (typeof o.ignoreRightBar === 'boolean') { state.ignoreRightBar = o.ignoreRightBar; store.set(KEYS.ignoreRightBar, state.ignoreRightBar); }
         if (typeof o.showSkipToast === 'boolean') { state.showSkipToast = o.showSkipToast; store.set(KEYS.showSkipToast, state.showSkipToast); }
+        if (typeof o.muteOnSkip === 'boolean') { state.muteOnSkip = o.muteOnSkip; store.set(KEYS.muteOnSkip, state.muteOnSkip); }
         if (typeof o.exemptNotOverrideAds === 'boolean') { state.exemptNotOverrideAds = o.exemptNotOverrideAds; store.set(KEYS.exemptNotOverrideAds, state.exemptNotOverrideAds); }
         if (typeof o.exemptBloggerAds === 'boolean') { state.exemptBloggerAds = o.exemptBloggerAds; store.set(KEYS.exemptBloggerAds, state.exemptBloggerAds); }
         if (typeof o.keywordEnabled === 'boolean') { state.keywordEnabled = o.keywordEnabled; store.set(KEYS.keywordEnabled, state.keywordEnabled); }
@@ -4983,6 +5046,7 @@
                 elementEnabled: !!state.elementEnabled,
                 adsEnabled: !!state.adsEnabled,
                 blockLive: !!state.blockLive,
+                muteOnSkip: !!state.muteOnSkip,
                 adBadgeEnabled: !!state.adBadgeEnabled,
                 shopAnchorEnabled: !!state.shopAnchorEnabled,
                 shopTextEnabled: !!state.shopTextEnabled,
