@@ -1,7 +1,7 @@
-﻿// ==UserScript==
+// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.5.0
+// @version      7.6.0
 // @description  识别广告角标/购物锚点/广告文字/自定义关键词，自动跳过广告视频；二级层为功能入口，内置判定逐项可开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.5.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.6.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -623,12 +623,19 @@
     let cachedCardAt = 0;
     let liveSeq = 0;
 
+    // 跳过动作期间作废卡片缓存，确保读到动画中的最新 DOM。
+    // 不这么做的话 120ms 缓存会让 waitForChange 一直读到旧卡片，
+    // 误判「未生效」并补发动作，结果一次跳两条。
+    function invalidateCardCache() {
+        cachedCard = null;
+        cachedCardAt = 0;
+    }
+
     function getCurrentCard() {
         const now = Date.now();
         if (cachedCard && now - cachedCardAt < 120 && cachedCard && cachedCard.isConnected) {
             return cachedCard;
         }
-
         let best = null;
         let bestArea = 0;
 
@@ -692,6 +699,49 @@
 
     function getActiveScope() {
         return getCurrentCard() || document.body || document.documentElement;
+    }
+
+    // 结构判定专用作用域：必须是"当前播放的卡片"，不能是整页。
+    // 整页扫描时相邻预加载广告卡片的角标/商品按钮会导致误判。
+    function resolveCardScope(fallbackScope) {
+        const card = getCurrentCard();
+        if (card) return card;
+
+        // 兜底：视口内重叠面积最大的 video-info 容器
+        try {
+            const infos = document.querySelectorAll('[data-e2e="video-info"]');
+            let best = null;
+            let bestArea = 0;
+            for (const el of infos) {
+                const a = viewportOverlap(el);
+                if (a > bestArea) {
+                    bestArea = a;
+                    best = el;
+                }
+            }
+            if (best) return best;
+        } catch (e) { /* ignore */ }
+
+        return fallbackScope;
+    }
+
+    // 视口内重叠面积最大的视频标题（必定属于当前播放的视频）
+    function getActiveDescText() {
+        try {
+            const descs = document.querySelectorAll('[data-e2e="video-desc"]');
+            let best = null;
+            let bestArea = 0;
+            for (const el of descs) {
+                const a = viewportOverlap(el);
+                if (a > bestArea) {
+                    bestArea = a;
+                    best = el;
+                }
+            }
+            return best ? (best.textContent || '') : '';
+        } catch (e) {
+            return '';
+        }
     }
 
     /* ============================================================
@@ -1053,22 +1103,26 @@
     }
 
     // 代码内置的广告判定，每一项受独立开关控制
+    // 注意：结构判定必须限定在当前卡片内。整页扫描时若用 document.body，
+    // querySelector 会命中相邻预加载广告卡片的角标/商品按钮，造成误判。
     function detectBuiltinAd(scope, text) {
         const compact = String(text || '').replace(/\s+/g, '');
 
-        if (state.adBadgeEnabled && detectAdBadge(scope)) {
+        const elScope = resolveCardScope(scope);
+
+        if (state.adBadgeEnabled && detectAdBadge(elScope)) {
             return { type: 'shop', detail: '广告：官方广告角标' };
         }
-        if (state.shopAnchorEnabled && detectShopAnchor(scope)) {
+        if (state.shopAnchorEnabled && detectShopAnchor(elScope)) {
             return { type: 'shop', detail: '广告：购物锚点' };
         }
-        if (state.shopTextEnabled && (detectShopText(scope) || /购物[|｜·]/.test(compact))) {
+        if (state.shopTextEnabled && (detectShopText(elScope) || /购物[|｜·]/.test(compact))) {
             return { type: 'shop', detail: '广告：购物文本' };
         }
         if (state.sameStyleEnabled && compact.includes('视频同款')) {
             return { type: 'shop', detail: '广告：视频同款' };
         }
-        if (state.productCardEnabled && (detectProductCard(scope) || /查看详情|查看商品|立即购买|去购买|马上抢/.test(compact))) {
+        if (state.productCardEnabled && (detectProductCard(elScope) || /查看详情|查看商品|立即购买|去购买|马上抢/.test(compact))) {
             return { type: 'shop', detail: '广告：商品卡片' };
         }
         return null;
@@ -1125,6 +1179,12 @@
             }
         } catch (e) { /* ignore */ }
 
+        // 再兜一层：视口内重叠最大的标题，必定属于当前播放的视频
+        try {
+            const activeDesc = getActiveDescText();
+            if (activeDesc) text = text + ' ' + activeDesc;
+        } catch (e) { /* ignore */ }
+
         // 广告文字：优先级等同于内置广告判定
         const adTextHit = state.adTextEnabled ? matchAdText(text) : null;
 
@@ -1167,18 +1227,24 @@
 
         if (!scope) return { items, vid };
 
+        // 结构判定限定当前卡片；文本仍用整页可见文本 + 当前卡片标题
+        const elScope = resolveCardScope(scope);
+
         let text = getVisibleText(scope);
 
         try {
-            const card = getCurrentCard();
-            if (card) {
-                const extra = [];
-                const desc = card.querySelector('[data-e2e="video-desc"]');
-                if (desc) extra.push(desc.textContent || '');
-                const nick = card.querySelector('[data-e2e="feed-video-nickname"]');
-                if (nick) extra.push(nick.textContent || '');
-                if (extra.length) text = text + ' ' + extra.join(' ');
-            }
+            const extra = [];
+            const desc = elScope.querySelector('[data-e2e="video-desc"]');
+            if (desc) extra.push(desc.textContent || '');
+            const nick = elScope.querySelector('[data-e2e="feed-video-nickname"]');
+            if (nick) extra.push(nick.textContent || '');
+            if (extra.length) text = text + ' ' + extra.join(' ');
+        } catch (e) { /* ignore */ }
+
+        // 兜底：视口内重叠最大的标题必定属于当前播放的视频
+        try {
+            const t = getActiveDescText();
+            if (t) text = text + ' ' + t;
         } catch (e) { /* ignore */ }
 
         const compact = text.replace(/\s+/g, '');
@@ -1191,17 +1257,17 @@
 
         // 元素规则
         if (state.elementEnabled) {
-            const r = detectElementRule(scope);
+            const r = detectElementRule(elScope);
             if (r) items.push('元素规则：' + r.label);
         }
 
-        // 广告
+        // 广告（结构判定限定当前卡片）
         if (state.adsEnabled) {
-            if (state.adBadgeEnabled && detectAdBadge(scope)) items.push('官方广告角标');
-            if (state.shopAnchorEnabled && detectShopAnchor(scope)) items.push('购物锚点');
-            if (state.shopTextEnabled && (detectShopText(scope) || /购物[|｜·]/.test(compact))) items.push('购物文本');
+            if (state.adBadgeEnabled && detectAdBadge(elScope)) items.push('官方广告角标');
+            if (state.shopAnchorEnabled && detectShopAnchor(elScope)) items.push('购物锚点');
+            if (state.shopTextEnabled && (detectShopText(elScope) || /购物[|｜·]/.test(compact))) items.push('购物文本');
             if (state.sameStyleEnabled && compact.includes('视频同款')) items.push('视频同款');
-            if (state.productCardEnabled && (detectProductCard(scope) || /查看详情|查看商品|立即购买|去购买|马上抢/.test(compact))) items.push('商品卡片');
+            if (state.productCardEnabled && (detectProductCard(elScope) || /查看详情|查看商品|立即购买|去购买|马上抢/.test(compact))) items.push('商品卡片');
             if (state.adTextEnabled) {
                 const at = matchAdText(text);
                 if (at) items.push('广告文字：' + at);
@@ -1457,14 +1523,24 @@
     const skipAttempts = new Map();   // vid -> 已尝试轮数
     let skipping = false;
 
-    function waitForChange(vid, timeout) {
+    // 等待切换完成：同时盯作品号和卡片序号，且每次采样前作废卡片缓存。
+    // 缓存 (120ms) 会在滑动画期间一直返回旧卡片，导致误判未生效并补发动作。
+    function waitForChange(vid, indexBefore, timeout) {
         return new Promise((resolve) => {
             const start = Date.now();
+
             const tick = () => {
+                invalidateCardCache();
+
                 if (getCurrentVid() !== vid) return resolve(true);
+
+                const idx = getActiveIndex();
+                if (indexBefore >= 0 && idx >= 0 && idx !== indexBefore) return resolve(true);
+
                 if (Date.now() - start >= timeout) return resolve(false);
                 setTimeout(tick, 80);
             };
+
             tick();
         });
     }
@@ -1496,13 +1572,23 @@
             { name: '键盘 ' + (dir > 0 ? '↓' : '↑'), run: () => keyStep(dir) }
         ];
 
+        invalidateCardCache();
         const beforeIndex = getActiveIndex();
 
         try {
             for (const step of steps) {
+                invalidateCardCache();
+
                 if (getCurrentVid() !== vid) break;
 
-                const indexBeforeClick = getActiveIndex();
+                // 上一次动作其实已经生效（序号已变），只是判定滞后：不要再补发
+                const idxCheck = getActiveIndex();
+                if (beforeIndex >= 0 && idxCheck >= 0 && idxCheck !== beforeIndex) {
+                    log('检测到已切换，停止补发');
+                    break;
+                }
+
+                const indexBeforeClick = idxCheck;
 
                 let ok = false;
                 try { ok = step.run() !== false; } catch (e) { ok = false; }
@@ -1511,10 +1597,11 @@
                     continue;
                 }
 
-                const moved = await waitForChange(vid, state.stepWait);
+                const moved = await waitForChange(vid, indexBeforeClick, state.stepWait);
 
                 // 首次用 next 按钮成功后，顺手校准它对应的真实方向
                 if (moved && step.isButton && state.nextArrowDir === 0 && lastButtonUsed === 'next') {
+                    invalidateCardCache();
                     const idxAfter = getActiveIndex();
                     if (idxAfter >= 0 && indexBeforeClick >= 0 && idxAfter !== indexBeforeClick) {
                         state.nextArrowDir = idxAfter > indexBeforeClick ? 1 : -1;
@@ -1527,6 +1614,8 @@
                 if (moved) break;
 
                 // 超时但序号已经变了：说明动画正在进行，不要再补发下一个动作
+                // （采样前作废缓存，否则读到的还是旧卡片，会误判没动）
+                invalidateCardCache();
                 const idxNow = getActiveIndex();
                 if (indexBeforeClick >= 0 && idxNow >= 0 && idxNow !== indexBeforeClick) {
                     log('检测到正在切换，停止补发');
@@ -1539,14 +1628,17 @@
             skipping = false;
         }
 
+        invalidateCardCache();
         const afterIndex = getActiveIndex();
         const vidChanged = getCurrentVid() !== vid;
         const indexMoved = beforeIndex >= 0 && afterIndex >= 0 && afterIndex !== beforeIndex;
         const directionOk = indexMoved
             ? ((dir > 0 && afterIndex > beforeIndex) || (dir < 0 && afterIndex < beforeIndex))
             : true;
+        // 作品号更新可能滞后，卡片序号变化同样说明已经跳走
+        const movedAway = vidChanged || indexMoved;
 
-        if (vidChanged && directionOk) {
+        if (movedAway && directionOk) {
             lastSkippedVid = vid;
             lastSkippedAt = Date.now();
             totalSkipped++;
@@ -1555,7 +1647,7 @@
             log('跳过成功 | 累计: ' + totalSkipped + ' | index: ' + beforeIndex + '→' + afterIndex + ' | 方向: ' + dirText);
             addReadable('跳过', info.detail, vid, info.type);
             if (state.showSkipToast) toast('跳过 · ' + info.detail);
-        } else if (vidChanged && !directionOk) {
+        } else if (movedAway && !directionOk) {
             // 跳过去了但方向反了：只记录，不锁死
             runtime.lastSkipResult = '方向跳反（' + beforeIndex + '→' + afterIndex + '）';
             log('方向跳反: ' + beforeIndex + ' -> ' + afterIndex + ' 期望: ' + dirText, 'warn');
