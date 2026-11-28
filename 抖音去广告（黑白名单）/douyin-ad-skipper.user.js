@@ -1,7 +1,7 @@
-// ==UserScript==
+﻿// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.7.0
+// @version      7.8.0
 // @description  识别广告角标/购物锚点/广告文字/自定义关键词，自动跳过广告视频；二级层为功能入口，内置判定逐项可开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.7.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.8.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -288,6 +288,8 @@
         showSkipToast: 'adskip.v2.showSkipToast',
         exemptNotOverrideAds: 'adskip.v2.exemptNotOverrideAds',
         exemptBloggerAds: 'adskip.v2.exemptBloggerAds',
+        autoHideEnabled: 'adskip.v2.autoHideEnabled',
+        autoHideDelay: 'adskip.v2.autoHideDelay',
         maxPerMinute: 'adskip.v2.maxPerMinute',
         keywordEnabled: 'adskip.v2.keywordEnabled',
         whitelistEnabled: 'adskip.v2.whitelistEnabled',
@@ -371,6 +373,9 @@
         exemptNotOverrideAds: store.get(KEYS.exemptNotOverrideAds, false),
         // 博主豁免词（@ 开头）不覆盖广告：只放行普通视频，博主的带货广告仍然跳过
         exemptBloggerAds: store.get(KEYS.exemptBloggerAds, false),
+        // 无操作自动隐藏：面板与子窗口闲置一段时间后自动收起
+        autoHideEnabled: store.get(KEYS.autoHideEnabled, true),
+        autoHideDelay: clampNum(store.get(KEYS.autoHideDelay, 10000), 2000, 600000, 10000),
         // 三个独立开关：屏蔽标签 / 豁免标签 / 元素屏蔽
         keywordEnabled: store.get(KEYS.keywordEnabled, true),
         whitelistEnabled: store.get(KEYS.whitelistEnabled, true),
@@ -3003,6 +3008,17 @@
                         <span class="ad-toggle-label">豁免博主广告<span>@ 开头的豁免词不覆盖广告，普通豁免词不受影响</span></span>
                         <button class="ad-mini-switch ad-exemptblog" type="button" role="switch"><i></i></button>
                     </div>
+                    <div class="ad-toggle-row">
+                        <span class="ad-toggle-label">无操作自动隐藏<span>面板和子窗口闲置一段时间后自动收起</span></span>
+                        <button class="ad-mini-switch ad-autohide" type="button" role="switch"><i></i></button>
+                    </div>
+                    <div class="ad-set-row">
+                        <span>隐藏延迟</span>
+                        <input class="ad-num ad-autohide-delay" type="number"
+                               min="2000" max="600000" step="1000" value="${state.autoHideDelay}">
+                        <span>ms</span>
+                        <em class="ad-hint">建议 5000–30000（2s–10min）</em>
+                    </div>
 
                     <div class="ad-set-row">
                         <span>跳过延迟</span>
@@ -3241,6 +3257,8 @@
             store.del(KEYS.maxPerMinute);
             store.del(KEYS.exemptNotOverrideAds);
             store.del(KEYS.exemptBloggerAds);
+            store.del(KEYS.autoHideEnabled);
+            store.del(KEYS.autoHideDelay);
             store.del(KEYS.keywordEnabled);
             store.del(KEYS.whitelistEnabled);
             store.del(KEYS.elementEnabled);
@@ -3271,6 +3289,8 @@
             state.maxPerMinute = 40;
             state.exemptNotOverrideAds = false;
             state.exemptBloggerAds = false;
+            state.autoHideEnabled = true;
+            state.autoHideDelay = 10000;
             state.keywordEnabled = true;
             state.whitelistEnabled = true;
             state.elementEnabled = true;
@@ -3578,6 +3598,31 @@
             });
         }
 
+        // 无操作自动隐藏
+        const autoHideBtn = panelWrap.querySelector('.ad-autohide');
+        if (autoHideBtn) {
+            autoHideBtn.addEventListener('click', () => {
+                state.autoHideEnabled = !state.autoHideEnabled;
+                store.set(KEYS.autoHideEnabled, state.autoHideEnabled);
+                syncToggleUI();
+                if (state.autoHideEnabled) resetAutoHide();
+                else stopAutoHide();
+                toast(state.autoHideEnabled ? '无操作自动隐藏已开启' : '无操作自动隐藏已关闭');
+            });
+        }
+
+        const autoHideDelayNum = panelWrap.querySelector('.ad-autohide-delay');
+        if (autoHideDelayNum) {
+            autoHideDelayNum.addEventListener('change', () => {
+                const v = clampNum(autoHideDelayNum.value, 2000, 600000, state.autoHideDelay);
+                autoHideDelayNum.value = v;
+                state.autoHideDelay = v;
+                store.set(KEYS.autoHideDelay, v);
+                resetAutoHide();
+                toast('隐藏延迟已设为 ' + (v / 1000) + ' 秒');
+            });
+        }
+
         // 每分钟尝试上限
         const maxPerNum = panelWrap.querySelector('.ad-maxper-num');
         if (maxPerNum) {
@@ -3689,6 +3734,7 @@
         const skiptoast = panelWrap && panelWrap.querySelector('.ad-skiptoast');
         const exemptAds = panelWrap && panelWrap.querySelector('.ad-exemptads');
         const exemptBlog = panelWrap && panelWrap.querySelector('.ad-exemptblog');
+        const autoHide = panelWrap && panelWrap.querySelector('.ad-autohide');
         const kwOn = panelWrap && panelWrap.querySelector('.ad-kw-on');
         const wlOn = panelWrap && panelWrap.querySelector('.ad-wl-on');
         const elemOn = panelWrap && panelWrap.querySelector('.ad-elem-on');
@@ -3707,6 +3753,7 @@
         if (skiptoast) skiptoast.classList.toggle('on', !!state.showSkipToast);
         if (exemptAds) exemptAds.classList.toggle('on', !!state.exemptNotOverrideAds);
         if (exemptBlog) exemptBlog.classList.toggle('on', !!state.exemptBloggerAds);
+        if (autoHide) autoHide.classList.toggle('on', !!state.autoHideEnabled);
         if (kwOn) kwOn.classList.toggle('on', !!state.keywordEnabled);
         if (wlOn) wlOn.classList.toggle('on', !!state.whitelistEnabled);
         if (elemOn) elemOn.classList.toggle('on', !!state.elementEnabled);
@@ -4027,6 +4074,8 @@
                     showSkipToast: !!state.showSkipToast,
                     exemptNotOverrideAds: !!state.exemptNotOverrideAds,
                     exemptBloggerAds: !!state.exemptBloggerAds,
+                    autoHideEnabled: !!state.autoHideEnabled,
+                    autoHideDelay: state.autoHideDelay,
                     keywordEnabled: !!state.keywordEnabled,
                     whitelistEnabled: !!state.whitelistEnabled,
                     elementEnabled: !!state.elementEnabled,
@@ -4169,6 +4218,7 @@
         set('.ad-kwlimit-num', state.keywordLimit);
         set('.ad-wllimit-num', state.whitelistLimit);
         set('.ad-maxper-num', state.maxPerMinute);
+        set('.ad-autohide-delay', state.autoHideDelay);
     }
 
     function closeImportDialog() {
@@ -4614,7 +4664,9 @@
                 pollMs: state.pollMs,
                 maxPerMinute: state.maxPerMinute,
                 exemptNotOverrideAds: !!state.exemptNotOverrideAds,
-                exemptBloggerAds: !!state.exemptBloggerAds
+                exemptBloggerAds: !!state.exemptBloggerAds,
+                autoHideEnabled: !!state.autoHideEnabled,
+                autoHideDelay: state.autoHideDelay
             },
             active: {
                 found: !!card,
@@ -4995,6 +5047,51 @@
         openSub(name);
     }
 
+    /* ---------- 无操作自动隐藏 ---------- */
+    let autoHideTimer = null;
+
+    function stopAutoHide() {
+        clearTimeout(autoHideTimer);
+        autoHideTimer = null;
+    }
+
+    function resetAutoHide() {
+        stopAutoHide();
+        if (!state.autoHideEnabled || !panelOpen) return;
+
+        autoHideTimer = setTimeout(() => {
+            autoHideTimer = null;
+            if (!panelOpen) return;
+            if (subWrap && subWrap.classList.contains('open')) closeSub();
+            closePanel();
+        }, state.autoHideDelay);
+    }
+
+    // 面板/子窗口内的任何操作都算"活跃"，重新计时
+    function bindAutoHideWatch() {
+        const onActivity = (e) => {
+            if (!panelOpen) return;
+            const t = e.target;
+            if (!t || t.nodeType !== 1) return;
+            const inPanel = panelWrap && panelWrap.contains(t);
+            const inSub = subWrap && subWrap.contains(t);
+            if (inPanel || inSub) resetAutoHide();
+        };
+
+        ['pointerdown', 'keydown', 'input', 'wheel', 'touchstart'].forEach(ev => {
+            document.addEventListener(ev, onActivity, true);
+        });
+
+        // 鼠标在面板上移动也算活跃（节流，避免每帧刷新计时器）
+        let lastMove = 0;
+        document.addEventListener('pointermove', (e) => {
+            const now = Date.now();
+            if (now - lastMove < 400) return;
+            lastMove = now;
+            onActivity(e);
+        }, { passive: true, capture: true });
+    }
+
     function openPanel() {
         if (!panelWrap) buildPanel();
         panelOpen = true;
@@ -5017,11 +5114,13 @@
             if (!panelOpen) return;
             positionPanel();
             panelWrap.style.setProperty('visibility', 'visible', 'important');
+            resetAutoHide();
         });
     }
 
     function closePanel() {
         panelOpen = false;
+        stopAutoHide();
         stopStatusLoop();
         closeSub();
         currentTab = 'home';
@@ -5046,6 +5145,7 @@
         buildPanel();
         bindDirectionWatch();
         bindPickMenu();
+        bindAutoHideWatch();
 
         // DOM 变化时检查（节流）
         let domTimer = null;

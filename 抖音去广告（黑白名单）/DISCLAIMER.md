@@ -1,7 +1,7 @@
 ﻿# 免责声明
 
 **项目名称**：抖音广告过滤脚本（`douyin-ad-skipper.user.js`）
-**当前版本**：v7.7.0
+**当前版本**：v7.8.0
 **作者**：lead
 **发布日期**：2026 年 11 月 22 日
 
@@ -84,7 +84,7 @@
 
 **本项目的设计原则是：数据只留在您的设备上。**
 
-经对 v7.7.0 版本源代码的核查，其技术特征如下：
+经对 v7.8.0 版本源代码的核查，其技术特征如下：
 
 1. **不含网络通信代码**。项目中没有 `fetch`、`XMLHttpRequest`、`sendBeacon`、`WebSocket` 或 `GM_xmlhttpRequest` 的调用，不会向任何服务器发送数据。
 2. **权限范围仅限本地存储**。所申请的用户脚本管理器权限为 `GM_setValue`、`GM_getValue`、`GM_deleteValue`，均用于在本机保存配置。
@@ -92,7 +92,7 @@
 4. **配置仅存本机**。您的配置（关键词、白名单、面板位置与大小、跳过统计等）仅保存在本机浏览器中，您可随时清除。
 5. **主动操作才涉及本地写入**。仅在您主动执行操作时（例如点击"导出配置"或"复制日志"），项目才可能调用浏览器剪贴板接口写入文本，或将内容以 JSON 文件保存到本机下载目录。这两个动作均由您本人触发，目标均为本机，不涉及任何上传。
 6. **会向页面注入界面元素，并接管右键菜单**。脚本会在页面角落注入一个浮窗按钮与设置面板，并在您右键点击页面时会拦截浏览器默认菜单、替换为脚本提供的"屏蔽/豁免"菜单（该行为可在设置中关闭）。这些注入元素随页面刷新消失，不写入磁盘，也不修改平台的服务端数据。
-7. **本地配置清单**。脚本通过 `GM_setValue`（不可用时回退 `localStorage`）在本机保存以下键，均以 `adskip.v2.` 开头：`pos`、`size`、`opacity`、`panelW`、`panelH`、`keywords`、`whitelist`、`keywordLimit`、`whitelistLimit`、`elementRules`、`enabled`、`flipDirection`、`giveUpOnFail`、`nextArrowDir`、`pickEnabled`、`scanFullPage`、`ignoreRightBar`、`showSkipToast`、`exemptNotOverrideAds`、`exemptBloggerAds`、`keywordEnabled`、`whitelistEnabled`、`elementEnabled`、`adsEnabled`、`adBadgeEnabled`、`shopAnchorEnabled`、`shopTextEnabled`、`sameStyleEnabled`、`productCardEnabled`、`adTexts`、`adTextLimit`、`adTextEnabled`、`subPos`、`subW`、`subH`、`detectDelay`、`cooldown`、`stepWait`、`pollMs`、`maxPerMinute`。您可在用户脚本管理器中清除全部数据。
+7. **本地配置清单**。脚本通过 `GM_setValue`（不可用时回退 `localStorage`）在本机保存以下键，均以 `adskip.v2.` 开头：`pos`、`size`、`opacity`、`panelW`、`panelH`、`keywords`、`whitelist`、`keywordLimit`、`whitelistLimit`、`elementRules`、`enabled`、`flipDirection`、`giveUpOnFail`、`nextArrowDir`、`pickEnabled`、`scanFullPage`、`ignoreRightBar`、`showSkipToast`、`exemptNotOverrideAds`、`exemptBloggerAds`、`autoHideEnabled`、`autoHideDelay`、`keywordEnabled`、`whitelistEnabled`、`elementEnabled`、`adsEnabled`、`adBadgeEnabled`、`shopAnchorEnabled`、`shopTextEnabled`、`sameStyleEnabled`、`productCardEnabled`、`adTexts`、`adTextLimit`、`adTextEnabled`、`subPos`、`subW`、`subH`、`detectDelay`、`cooldown`、`stepWait`、`pollMs`、`maxPerMinute`。您可在用户脚本管理器中清除全部数据。
 8. **对页面性能的影响**。脚本以可配置的间隔（默认约 250ms）扫描当前可见区域的文本，并对元素规则做合并选择器查询。默认配置下开销很低；但若将扫描间隔调到极小、或配置数千条元素规则，会明显增加页面 CPU 占用，进而影响滚动与播放流畅度。此类配置由使用者自行选择，后果亦由其承担。
 9. **不修改平台数据，不上传内容**。脚本只改变本机的浏览行为（跳过当前内容），不发送评论、不点赞、不修改账号状态，也不将页面内容传输至外部。此点同样仅适用于原始版本，第三方修改版不受此约束。
 
@@ -127,10 +127,10 @@
 为防止他人以本项目名义分发被篡改的脚本，现公布当前版本的完整性信息，供下载后自行核对：
 
 - 文件名：`douyin-ad-skipper.user.js`
-- 版本：`v7.7.0`
-- 大小：206,455 字节
-- 行数：5,075 行
-- SHA-256：`2B27039484F6D47985F41CF9BE287E39F7358FC3E14B0245851F2ED7878E246C`
+- 版本：`v7.8.0`
+- 大小：210,912 字节
+- 行数：5,175 行
+- SHA-256：`70C5CE2C305A175DE7741C6D73EA1D279D72C231125BC735ABFE3CBB248C5BAB`
 
 Windows PowerShell 校验命令：
 
@@ -164,7 +164,7 @@ Get-FileHash .\douyin-ad-skipper.user.js -Algorithm SHA256
 
 ## 十二、生效与变更
 
-1. 本声明自 2026 年 11 月 22 日起生效，适用于本项目 v7.7.0 及此后版本。
+1. 本声明自 2026 年 11 月 22 日起生效，适用于本项目 v7.8.0 及此后版本。
 2. 作者可能不时更新本声明。更新后的声明自发布之日起生效，并适用于发布时仍在使用本项目的用户。
 3. 本文引用的法律法规名称与条款，以发布时现行有效的文本为准；如相关法律修订，以修订后文本为准。
 
@@ -200,7 +200,7 @@ Get-FileHash .\douyin-ad-skipper.user.js -Algorithm SHA256
  *
  * 完整免责声明见同目录 DISCLAIMER.md，其内容为本项目许可条件的组成部分。
  * 联系方式（仅用于权利通知与合规沟通）：luoxiashuang11@gmail.com
- * SHA-256: `2B27039484F6D47985F41CF9BE287E39F7358FC3E14B0245851F2ED7878E246C`
+ * SHA-256: `70C5CE2C305A175DE7741C6D73EA1D279D72C231125BC735ABFE3CBB248C5BAB`
  * ------------------------------------------------------------------ */
 ```
 
