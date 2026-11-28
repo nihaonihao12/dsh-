@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.9.0
+// @version      7.9.1
 // @description  识别广告角标/购物锚点/广告文字/自定义关键词，自动跳过广告视频；二级层为功能入口，内置判定逐项可开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.9.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.9.1 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -2870,6 +2870,8 @@
             if (!panelOpen) return;
             if (panelWrap && panelWrap.contains(e.target)) return;
             if (fab && fab.contains(e.target)) return;
+            // 导入/确认弹窗挂在 body 上，点它内部不算点空白
+            if (e.target.closest && e.target.closest('#ad-import-mask')) return;
             closePanel();
         }, true);
 
@@ -3683,9 +3685,20 @@
         panelWrap.querySelectorAll('.ad-batch-all').forEach(btn => {
             btn.addEventListener('click', () => {
                 const key = btn.parentElement.getAttribute('data-list');
-                getVisibleList(key).forEach(k => batchState[key].selected.add(k));
+                const st = batchState[key];
+                getVisibleList(key).forEach(k => st.selected.add(k));
+
+                // 直接给已渲染的标签打选中态，避免整表重渲染
+                const box = getListBox(key);
+                if (box) {
+                    box.querySelectorAll('.ad-tag').forEach(tag => {
+                        const label = tag.querySelector('span');
+                        if (label && st.selected.has(label.textContent)) {
+                            tag.classList.add('selected');
+                        }
+                    });
+                }
                 syncBatchUI(key);
-                rerenderList(key);
             });
         });
 
@@ -4596,10 +4609,21 @@
         return q ? state.adTexts.filter(k => k.toLowerCase().includes(q)) : state.adTexts;
     }
 
-    function rerenderList(key) {
+    function getListBox(key) {
+        if (!panelWrap) return null;
+        if (key === 'whitelist') return panelWrap.querySelector('.ad-wl-tags');
+        if (key === 'adtext') return panelWrap.querySelector('.ad-adtext-tags');
+        return panelWrap.querySelector('.ad-tags:not(.ad-wl-tags):not(.ad-adtext-tags)');
+    }
+
+    function rerenderList(key, keepScroll) {
+        const box = getListBox(key);
+        const top = (keepScroll && box) ? box.scrollTop : 0;
         if (key === 'tags') renderTags();
         else if (key === 'whitelist') renderWhitelist();
         else renderAdTexts();
+        const nb = getListBox(key);
+        if (keepScroll && nb) nb.scrollTop = top;
     }
 
     function syncBatchUI(key) {
@@ -4619,7 +4643,7 @@
         }
     }
 
-    // 批量模式下的标签点击：切换选中
+    // 批量模式下的标签点击：切换选中（只改 class，不重渲染，避免列表滚回顶部）
     function bindBatchTag(tag, kw, key) {
         if (!batchState[key].active) return;
 
@@ -4628,10 +4652,15 @@
 
         tag.addEventListener('click', (e) => {
             if (e.target.tagName === 'I') return;   // 点删除按钮不切换选中
-            if (st.selected.has(kw)) st.selected.delete(kw);
-            else st.selected.add(kw);
-            syncBatchUI(key);
-            rerenderList(key);
+
+            if (st.selected.has(kw)) {
+                st.selected.delete(kw);
+                tag.classList.remove('selected');
+            } else {
+                st.selected.add(kw);
+                tag.classList.add('selected');
+            }
+            syncBatchUI(key);   // 只更新计数
         });
     }
 
@@ -4685,7 +4714,7 @@
             st.selected.clear();
             st.active = false;
             syncBatchUI(key);
-            rerenderList(key);
+            rerenderList(key, true);
             toast('已删除 ' + count + ' 个标签');
         });
     }
