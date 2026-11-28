@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.6.0
+// @version      7.7.0
 // @description  识别广告角标/购物锚点/广告文字/自定义关键词，自动跳过广告视频；二级层为功能入口，内置判定逐项可开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.6.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.7.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -287,6 +287,7 @@
         whitelistLimit: 'adskip.v2.whitelistLimit',
         showSkipToast: 'adskip.v2.showSkipToast',
         exemptNotOverrideAds: 'adskip.v2.exemptNotOverrideAds',
+        exemptBloggerAds: 'adskip.v2.exemptBloggerAds',
         maxPerMinute: 'adskip.v2.maxPerMinute',
         keywordEnabled: 'adskip.v2.keywordEnabled',
         whitelistEnabled: 'adskip.v2.whitelistEnabled',
@@ -368,6 +369,8 @@
         whitelistLimit: clampNum(store.get(KEYS.whitelistLimit, 60), 1, 1000000, 60),
         showSkipToast: store.get(KEYS.showSkipToast, true),
         exemptNotOverrideAds: store.get(KEYS.exemptNotOverrideAds, false),
+        // 博主豁免词（@ 开头）不覆盖广告：只放行普通视频，博主的带货广告仍然跳过
+        exemptBloggerAds: store.get(KEYS.exemptBloggerAds, false),
         // 三个独立开关：屏蔽标签 / 豁免标签 / 元素屏蔽
         keywordEnabled: store.get(KEYS.keywordEnabled, true),
         whitelistEnabled: store.get(KEYS.whitelistEnabled, true),
@@ -1190,11 +1193,14 @@
 
         // 豁免关键词优先级最高：命中就不再跳过。
         // 但开启「豁免不覆盖广告」后，内置广告判定与广告文字优先，豁免不再放行。
+        // 「豁免博主广告」开启时，只有 @ 开头的豁免词不覆盖广告，普通豁免词照常生效。
         // 豁免标签开关关闭时，整段豁免判定直接跳过。
         const exempt = state.whitelistEnabled ? matchWhitelist(text) : null;
 
         if (exempt) {
-            if (state.exemptNotOverrideAds && state.adsEnabled) {
+            const bloggerExempt = state.exemptBloggerAds && exempt.charAt(0) === '@';
+
+            if ((state.exemptNotOverrideAds || bloggerExempt) && state.adsEnabled) {
                 const builtin = detectBuiltinAd(scope, text);
                 if (builtin) return { type: builtin.type, detail: builtin.detail + '（豁免不覆盖）' };
                 if (adTextHit) return { type: 'shop', detail: '广告文字：' + adTextHit + '（豁免不覆盖）' };
@@ -1252,7 +1258,12 @@
         // 豁免
         if (state.whitelistEnabled) {
             const wl = matchWhitelist(text);
-            if (wl) items.push('豁免标签：' + wl);
+            if (wl) {
+                const note = (state.exemptBloggerAds && wl.charAt(0) === '@')
+                    ? '（博主豁免，不覆盖广告）'
+                    : '';
+                items.push('豁免标签：' + wl + note);
+            }
         }
 
         // 元素规则
@@ -2170,12 +2181,31 @@
 
         .ad-tags {
             display: flex;
-            flex-wrap: wrap;
-            gap: 7px;
+            flex-direction: column;
+            gap: 10px;
             min-height: 52px;
             flex: 1;
-            align-content: flex-start;
             overflow-y: auto;
+        }
+        .ad-tags-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .ad-tags-group-label {
+            font-size: 10px;
+            color: #6f6f78;
+            padding: 1px 0;
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            background: rgba(22,22,26,.96);
+        }
+        .ad-tags-inner {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 7px;
+            align-content: flex-start;
         }
         .ad-tags-head {
             font-size: 10px;
@@ -2969,6 +2999,10 @@
                         <span class="ad-toggle-label">豁免不覆盖广告<span>命中豁免词时，明确广告仍然跳过</span></span>
                         <button class="ad-mini-switch ad-exemptads" type="button" role="switch"><i></i></button>
                     </div>
+                    <div class="ad-toggle-row">
+                        <span class="ad-toggle-label">豁免博主广告<span>@ 开头的豁免词不覆盖广告，普通豁免词不受影响</span></span>
+                        <button class="ad-mini-switch ad-exemptblog" type="button" role="switch"><i></i></button>
+                    </div>
 
                     <div class="ad-set-row">
                         <span>跳过延迟</span>
@@ -3206,6 +3240,7 @@
             store.del(KEYS.panelH);
             store.del(KEYS.maxPerMinute);
             store.del(KEYS.exemptNotOverrideAds);
+            store.del(KEYS.exemptBloggerAds);
             store.del(KEYS.keywordEnabled);
             store.del(KEYS.whitelistEnabled);
             store.del(KEYS.elementEnabled);
@@ -3235,6 +3270,7 @@
             state.subH = 0;
             state.maxPerMinute = 40;
             state.exemptNotOverrideAds = false;
+            state.exemptBloggerAds = false;
             state.keywordEnabled = true;
             state.whitelistEnabled = true;
             state.elementEnabled = true;
@@ -3529,6 +3565,19 @@
             });
         }
 
+        // 豁免博主广告：@ 开头的豁免词不覆盖广告
+        const exemptBlogBtn = panelWrap.querySelector('.ad-exemptblog');
+        if (exemptBlogBtn) {
+            exemptBlogBtn.addEventListener('click', () => {
+                state.exemptBloggerAds = !state.exemptBloggerAds;
+                store.set(KEYS.exemptBloggerAds, state.exemptBloggerAds);
+                syncToggleUI();
+                toast(state.exemptBloggerAds
+                    ? '博主豁免不再放行广告（普通豁免词不受影响）'
+                    : '博主豁免恢复优先');
+            });
+        }
+
         // 每分钟尝试上限
         const maxPerNum = panelWrap.querySelector('.ad-maxper-num');
         if (maxPerNum) {
@@ -3639,6 +3688,7 @@
         const bar = panelWrap && panelWrap.querySelector('.ad-ignorebar');
         const skiptoast = panelWrap && panelWrap.querySelector('.ad-skiptoast');
         const exemptAds = panelWrap && panelWrap.querySelector('.ad-exemptads');
+        const exemptBlog = panelWrap && panelWrap.querySelector('.ad-exemptblog');
         const kwOn = panelWrap && panelWrap.querySelector('.ad-kw-on');
         const wlOn = panelWrap && panelWrap.querySelector('.ad-wl-on');
         const elemOn = panelWrap && panelWrap.querySelector('.ad-elem-on');
@@ -3656,6 +3706,7 @@
         if (bar) bar.classList.toggle('on', !!state.ignoreRightBar);
         if (skiptoast) skiptoast.classList.toggle('on', !!state.showSkipToast);
         if (exemptAds) exemptAds.classList.toggle('on', !!state.exemptNotOverrideAds);
+        if (exemptBlog) exemptBlog.classList.toggle('on', !!state.exemptBloggerAds);
         if (kwOn) kwOn.classList.toggle('on', !!state.keywordEnabled);
         if (wlOn) wlOn.classList.toggle('on', !!state.whitelistEnabled);
         if (elemOn) elemOn.classList.toggle('on', !!state.elementEnabled);
@@ -3975,6 +4026,7 @@
                     nextArrowDir: state.nextArrowDir,
                     showSkipToast: !!state.showSkipToast,
                     exemptNotOverrideAds: !!state.exemptNotOverrideAds,
+                    exemptBloggerAds: !!state.exemptBloggerAds,
                     keywordEnabled: !!state.keywordEnabled,
                     whitelistEnabled: !!state.whitelistEnabled,
                     elementEnabled: !!state.elementEnabled,
@@ -4073,6 +4125,7 @@
         if (typeof o.ignoreRightBar === 'boolean') { state.ignoreRightBar = o.ignoreRightBar; store.set(KEYS.ignoreRightBar, state.ignoreRightBar); }
         if (typeof o.showSkipToast === 'boolean') { state.showSkipToast = o.showSkipToast; store.set(KEYS.showSkipToast, state.showSkipToast); }
         if (typeof o.exemptNotOverrideAds === 'boolean') { state.exemptNotOverrideAds = o.exemptNotOverrideAds; store.set(KEYS.exemptNotOverrideAds, state.exemptNotOverrideAds); }
+        if (typeof o.exemptBloggerAds === 'boolean') { state.exemptBloggerAds = o.exemptBloggerAds; store.set(KEYS.exemptBloggerAds, state.exemptBloggerAds); }
         if (typeof o.keywordEnabled === 'boolean') { state.keywordEnabled = o.keywordEnabled; store.set(KEYS.keywordEnabled, state.keywordEnabled); }
         if (typeof o.whitelistEnabled === 'boolean') { state.whitelistEnabled = o.whitelistEnabled; store.set(KEYS.whitelistEnabled, state.whitelistEnabled); }
         if (typeof o.elementEnabled === 'boolean') { state.elementEnabled = o.elementEnabled; store.set(KEYS.elementEnabled, state.elementEnabled); }
@@ -4204,7 +4257,7 @@
             return;
         }
 
-        list.forEach(kw => {
+        renderTagGroups(box, list, (kw) => {
             const tag = document.createElement('span');
             tag.className = 'ad-tag exempt';
 
@@ -4224,8 +4277,8 @@
 
             tag.appendChild(label);
             tag.appendChild(del);
-            box.appendChild(tag);
-        });
+            return tag;
+        }, '豁免词');
 
         box.scrollTop = 0;
         updateEntryCounts();
@@ -4308,7 +4361,7 @@
             return;
         }
 
-        list.forEach(kw => {
+        renderTagGroups(box, list, (kw) => {
             const tag = document.createElement('span');
             tag.className = 'ad-tag adtext';
 
@@ -4328,11 +4381,42 @@
 
             tag.appendChild(label);
             tag.appendChild(del);
-            box.appendChild(tag);
-        });
+            return tag;
+        }, '广告文字');
 
         box.scrollTop = 0;
         updateEntryCounts();
+    }
+
+    // 按「@ 博主 / 普通」分组把标签渲染进容器
+    function renderTagGroups(box, list, makeTag, otherTitle) {
+        box.innerHTML = '';
+
+        const bloggers = list.filter(k => k.charAt(0) === '@');
+        const others = list.filter(k => k.charAt(0) !== '@');
+
+        const addGroup = (title, arr) => {
+            if (!arr.length) return;
+
+            const group = document.createElement('div');
+            group.className = 'ad-tags-group';
+
+            const label = document.createElement('div');
+            label.className = 'ad-tags-group-label';
+            label.textContent = title + ' · ' + arr.length;
+
+            const inner = document.createElement('div');
+            inner.className = 'ad-tags-inner';
+
+            arr.forEach(kw => inner.appendChild(makeTag(kw)));
+
+            group.appendChild(label);
+            group.appendChild(inner);
+            box.appendChild(group);
+        };
+
+        addGroup('博主', bloggers);
+        addGroup(otherTitle || '关键词', others);
     }
 
     function renderTags() {
@@ -4371,7 +4455,7 @@
             return;
         }
 
-        list.forEach(kw => {
+        renderTagGroups(box, list, (kw) => {
             const tag = document.createElement('span');
             tag.className = 'ad-tag';
 
@@ -4391,8 +4475,8 @@
 
             tag.appendChild(label);
             tag.appendChild(del);
-            box.appendChild(tag);
-        });
+            return tag;
+        }, '关键词');
 
         // 新词在最前面，滚回顶部保证可见
         box.scrollTop = 0;
@@ -4529,7 +4613,8 @@
                 stepWait: state.stepWait,
                 pollMs: state.pollMs,
                 maxPerMinute: state.maxPerMinute,
-                exemptNotOverrideAds: !!state.exemptNotOverrideAds
+                exemptNotOverrideAds: !!state.exemptNotOverrideAds,
+                exemptBloggerAds: !!state.exemptBloggerAds
             },
             active: {
                 found: !!card,
