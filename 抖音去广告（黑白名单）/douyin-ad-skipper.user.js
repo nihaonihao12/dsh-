@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         抖音广告过滤（购物锚点 + 关键词）
 // @namespace    dsh.local.douyin.adskip
-// @version      7.4.0
+// @version      7.5.0
 // @description  识别广告角标/购物锚点/广告文字/自定义关键词，自动跳过广告视频；二级层为功能入口，内置判定逐项可开关
 // @author       lead
 // @match        https://www.douyin.com/*
@@ -12,7 +12,7 @@
 // ==/UserScript==
 
 /* ============================================================
- * 抖音广告过滤脚本 v7.4.0 —— 完整免责声明
+ * 抖音广告过滤脚本 v7.5.0 —— 完整免责声明
  *
  * 本注释块为完整声明，与同目录 DISCLAIMER.md 一致。
  * 下载、安装、运行、复制、修改或分发本项目的任何部分，
@@ -527,10 +527,48 @@
             toastEl.id = 'adskip-toast';
             document.body.appendChild(toastEl);
         }
+        toastEl.onclick = null;
+        toastEl.classList.remove('action');
         toastEl.textContent = msg;
         toastEl.classList.add('show');
         clearTimeout(toastTimer);
         toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1800);
+    }
+
+    // 带点击动作的提示：点击后执行 onClick，5 秒内有效
+    let toastActionTimer = null;
+    let toastActionHandler = null;
+
+    function toastAction(msg, onClick) {
+        if (!document.body) return;
+        if (!toastEl) {
+            toastEl = document.createElement('div');
+            toastEl.id = 'adskip-toast';
+            document.body.appendChild(toastEl);
+        }
+
+        clearTimeout(toastActionTimer);
+        toastActionHandler = onClick || null;
+
+        toastEl.textContent = msg;
+        toastEl.classList.add('show');
+        toastEl.classList.toggle('action', !!toastActionHandler);
+
+        toastEl.onclick = (e) => {
+            e.stopPropagation();
+            const fn = toastActionHandler;
+            toastEl.classList.remove('show', 'action');
+            toastEl.onclick = null;
+            toastActionHandler = null;
+            if (fn) fn();
+        };
+
+        clearTimeout(toastTimer);
+        toastActionTimer = setTimeout(() => {
+            toastEl.classList.remove('show', 'action');
+            toastEl.onclick = null;
+            toastActionHandler = null;
+        }, 5000);
     }
 
     function escapeHtml(s) {
@@ -1121,6 +1159,64 @@
         return detectTextRules(text);
     }
 
+    // 完整扫描当前卡片命中的所有规则（不短路），供「检测」按钮使用
+    function inspectRules() {
+        const scope = getScanScope();
+        const items = [];
+        const vid = getCurrentVid();
+
+        if (!scope) return { items, vid };
+
+        let text = getVisibleText(scope);
+
+        try {
+            const card = getCurrentCard();
+            if (card) {
+                const extra = [];
+                const desc = card.querySelector('[data-e2e="video-desc"]');
+                if (desc) extra.push(desc.textContent || '');
+                const nick = card.querySelector('[data-e2e="feed-video-nickname"]');
+                if (nick) extra.push(nick.textContent || '');
+                if (extra.length) text = text + ' ' + extra.join(' ');
+            }
+        } catch (e) { /* ignore */ }
+
+        const compact = text.replace(/\s+/g, '');
+
+        // 豁免
+        if (state.whitelistEnabled) {
+            const wl = matchWhitelist(text);
+            if (wl) items.push('豁免标签：' + wl);
+        }
+
+        // 元素规则
+        if (state.elementEnabled) {
+            const r = detectElementRule(scope);
+            if (r) items.push('元素规则：' + r.label);
+        }
+
+        // 广告
+        if (state.adsEnabled) {
+            if (state.adBadgeEnabled && detectAdBadge(scope)) items.push('官方广告角标');
+            if (state.shopAnchorEnabled && detectShopAnchor(scope)) items.push('购物锚点');
+            if (state.shopTextEnabled && (detectShopText(scope) || /购物[|｜·]/.test(compact))) items.push('购物文本');
+            if (state.sameStyleEnabled && compact.includes('视频同款')) items.push('视频同款');
+            if (state.productCardEnabled && (detectProductCard(scope) || /查看详情|查看商品|立即购买|去购买|马上抢/.test(compact))) items.push('商品卡片');
+            if (state.adTextEnabled) {
+                const at = matchAdText(text);
+                if (at) items.push('广告文字：' + at);
+            }
+        }
+
+        // 关键词
+        if (state.keywordEnabled) {
+            const kw = matchKeyword(text);
+            if (kw) items.push('屏蔽标签：' + kw);
+        }
+
+        return { items, vid };
+    }
+
     /* ============================================================
      * 4. 跳过动作
      * ============================================================ */
@@ -1652,6 +1748,19 @@
             cursor: pointer; line-height: 1; padding: 0 2px; border-radius: 4px;
         }
         .ad-head .ad-close:hover { color: #fff; }
+
+        .ad-head .ad-inspect {
+            flex: none;
+            padding: 3px 8px;
+            border-radius: 5px;
+            border: 1px solid rgba(96,165,250,.35);
+            background: rgba(37,99,235,.16);
+            color: #93c5fd;
+            font: 10px system-ui, sans-serif;
+            cursor: pointer;
+        }
+        .ad-head .ad-inspect:hover { background: rgba(37,99,235,.32); }
+        .ad-head .ad-inspect:active { transform: scale(.96); }
 
         .ad-head .ad-mini-switch {
             flex: none;
@@ -2365,6 +2474,15 @@
             white-space: nowrap;
         }
         #adskip-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+        #adskip-toast.action {
+            pointer-events: auto;
+            cursor: pointer;
+            border-color: rgba(96,165,250,.5);
+        }
+        #adskip-toast.action::after {
+            content: '  ·  点击查看日志';
+            color: #93c5fd;
+        }
     `;
 
     function injectStyle() {
@@ -2567,6 +2685,7 @@
                     <b>广告过滤</b>
                     <button class="ad-mini-switch ad-head-switch" type="button" role="switch" title="过滤开关"><i></i></button>
                     <span class="ad-stat">已跳过 0</span>
+                    <button class="ad-inspect" type="button" title="检查当前页触发了哪些规则">检测</button>
                     <button class="ad-close" type="button" title="关闭">×</button>
                 </div>
 
@@ -2826,6 +2945,9 @@
         subWrap = panelWrap.querySelector('#adskip-subwrap');
 
         panelWrap.querySelector('.ad-close').addEventListener('click', closePanel);
+
+        const inspectBtn = panelWrap.querySelector('.ad-inspect');
+        if (inspectBtn) inspectBtn.addEventListener('click', runInspect);
 
         // 二级层：功能入口 → 打开独立的三级层窗口
         panelWrap.querySelectorAll('.ad-entry[data-target]').forEach(entry => {
@@ -4468,6 +4590,9 @@
 
         panelWrap.style.left = left + 'px';
         panelWrap.style.top = top + 'px';
+
+        // 主面板移动或改尺寸后，三级层子窗口同步重新吸附
+        if (subWrap && subWrap.classList.contains('open')) positionSub();
     }
 
     const SUB_TITLES = {
@@ -4502,6 +4627,37 @@
 
     function closeSub() {
         if (subWrap) subWrap.classList.remove('open');
+    }
+
+    // 检测当前页命中的规则：写可读日志 + 弹可点击提示
+    function runInspect() {
+        const result = inspectRules();
+        const vid = result.vid || '';
+
+        if (!result.items.length) {
+            addReadable('检测', '未命中任何规则', vid, 'inspect');
+            toastAction('检测：当前页未命中任何规则', openReadableLogs);
+            return;
+        }
+
+        const summary = result.items.join('、');
+        addReadable('检测', '命中 ' + result.items.length + ' 项：' + summary, vid, 'inspect');
+
+        const short = summary.length > 42 ? summary.slice(0, 42) + '…' : summary;
+        toastAction('检测：命中 ' + result.items.length + ' 项 · ' + short, openReadableLogs);
+    }
+
+    // 打开面板并跳到可读日志
+    function openReadableLogs() {
+        if (!panelOpen) openPanel();
+        switchTab('logs');
+        logView = 'readable';
+        if (panelWrap) {
+            panelWrap.querySelectorAll('.ad-log-tab').forEach(t => {
+                t.classList.toggle('active', t.getAttribute('data-logview') === 'readable');
+            });
+        }
+        renderLogs();
     }
 
     // 应用子窗口尺寸（高度 0 = 自适应内容）
